@@ -18,6 +18,7 @@ mod bitboard;
 mod board;
 mod book;
 mod eval;
+mod magic;
 mod movegen;
 mod moves;
 mod perft;
@@ -45,6 +46,10 @@ fn main() {
     }
     if args.len() > 1 && args[1] == "selfplay" {
         run_selfplay(&args[2..]);
+        return;
+    }
+    if args.len() > 1 && args[1] == "bench-attacks" {
+        run_bench_attacks();
         return;
     }
 
@@ -118,4 +123,58 @@ fn run_selfplay(args: &[String]) {
     }
 
     println!("\nAuto-juego completado sin movimientos ilegales.");
+}
+
+/// Micro-benchmark temporal de diagnóstico: compara el cómputo puro de
+/// ataques de piezas deslizantes (magic vs. rayos), sin nada más del motor
+/// alrededor, usando las mismas tablas reales (`bitboard::tables()`). Solo
+/// para investigar dónde se pierde/gana tiempo; no es parte del motor.
+fn run_bench_attacks() {
+    use bitboard::tables;
+
+    let occupancies: Vec<u64> = {
+        let mut v = Vec::new();
+        let mut x: u64 = 0x123456789ABCDEF0;
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            v.push(x & (x >> 1)); // sesgado a disperso, más realista que uniforme
+        }
+        v
+    };
+
+    const ITERS: u32 = 2000;
+
+    let start = Instant::now();
+    let mut acc: u64 = 0;
+    for _ in 0..ITERS {
+        for &occ in &occupancies {
+            for sq in 0u8..64 {
+                acc ^= tables().rook_attacks(sq, occ);
+                acc ^= tables().bishop_attacks(sq, occ);
+            }
+        }
+    }
+    let magic_elapsed = start.elapsed();
+    let calls = (ITERS as u64) * (occupancies.len() as u64) * 64 * 2;
+    println!("magic:  {calls} llamadas en {:.3}s ({:.1}M llamadas/s) [acc={acc}]",
+        magic_elapsed.as_secs_f64(), calls as f64 / magic_elapsed.as_secs_f64() / 1e6);
+
+    let start = Instant::now();
+    let mut acc: u64 = 0;
+    for _ in 0..ITERS {
+        for &occ in &occupancies {
+            for sq in 0u8..64 {
+                acc ^= tables().rook_attacks_ray(sq, occ);
+                acc ^= tables().bishop_attacks_ray(sq, occ);
+            }
+        }
+    }
+    let ray_elapsed = start.elapsed();
+    println!("rayos:  {calls} llamadas en {:.3}s ({:.1}M llamadas/s) [acc={acc}]",
+        ray_elapsed.as_secs_f64(), calls as f64 / ray_elapsed.as_secs_f64() / 1e6);
+
+    let ratio = ray_elapsed.as_secs_f64() / magic_elapsed.as_secs_f64();
+    println!("magic es {ratio:.2}x respecto a rayos en este micro-benchmark aislado");
 }

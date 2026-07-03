@@ -69,7 +69,7 @@ pub fn print_bitboard(bb: Bitboard) -> String {
 
 /// Genera el rayo completo (sin incluir la casilla de origen) desde `sq` en
 /// la dirección (df, dr), deteniéndose en el borde del tablero.
-fn gen_ray(sq: Square, df: i32, dr: i32) -> Bitboard {
+pub(crate) fn gen_ray(sq: Square, df: i32, dr: i32) -> Bitboard {
     let mut bb = EMPTY;
     let mut f = file_of(sq) as i32 + df;
     let mut r = rank_of(sq) as i32 + dr;
@@ -170,9 +170,15 @@ impl Tables {
         self.pawn[color.index()][sq as usize]
     }
 
-    /// Recorta un rayo precalculado en el primer bloqueador.
+    /// Recorta un rayo precalculado en el primer bloqueador. Método de
+    /// referencia ("oráculo"): ya no se usa en la ruta rápida del motor
+    /// (ver `bishop_attacks`/`rook_attacks`, que usan magic bitboards desde
+    /// la Fase 1 continuada), pero se mantiene disponible para comparar
+    /// contra él en tests — es la implementación original, validada con
+    /// perft exacto, y sirve como red de seguridad independiente.
     /// `positive` indica si la dirección incrementa el índice de casilla
     /// (N, E, NE, NW) o lo decrementa (S, W, SE, SW).
+    #[allow(dead_code)]
     #[inline(always)]
     fn slide(table: &[Bitboard; 64], sq: Square, occupancy: Bitboard, positive: bool) -> Bitboard {
         let attacks = table[sq as usize];
@@ -188,20 +194,39 @@ impl Tables {
         attacks & !table[blocker_sq as usize]
     }
 
-    pub fn bishop_attacks(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
+    /// Implementación de referencia por rayos (ver comentario en `slide`).
+    #[allow(dead_code)]
+    pub fn bishop_attacks_ray(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
         Self::slide(&self.ray_ne, sq, occupancy, true)
             | Self::slide(&self.ray_nw, sq, occupancy, true)
             | Self::slide(&self.ray_se, sq, occupancy, false)
             | Self::slide(&self.ray_sw, sq, occupancy, false)
     }
 
-    pub fn rook_attacks(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
+    /// Implementación de referencia por rayos (ver comentario en `slide`).
+    #[allow(dead_code)]
+    pub fn rook_attacks_ray(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
         Self::slide(&self.ray_n, sq, occupancy, true)
             | Self::slide(&self.ray_s, sq, occupancy, false)
             | Self::slide(&self.ray_e, sq, occupancy, true)
             | Self::slide(&self.ray_w, sq, occupancy, false)
     }
 
+    /// Ataques de alfil: magic bitboards (O(1) por consulta), validados
+    /// exhaustivamente contra `bishop_attacks_ray` — ver `src/magic.rs`.
+    #[inline(always)]
+    pub fn bishop_attacks(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
+        crate::magic::magic_tables().bishop_attacks(sq, occupancy)
+    }
+
+    /// Ataques de torre: magic bitboards (O(1) por consulta), validados
+    /// exhaustivamente contra `rook_attacks_ray` — ver `src/magic.rs`.
+    #[inline(always)]
+    pub fn rook_attacks(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
+        crate::magic::magic_tables().rook_attacks(sq, occupancy)
+    }
+
+    #[inline(always)]
     pub fn queen_attacks(&self, sq: Square, occupancy: Bitboard) -> Bitboard {
         self.bishop_attacks(sq, occupancy) | self.rook_attacks(sq, occupancy)
     }
@@ -252,5 +277,37 @@ mod tests {
         let d4 = str_to_square("d4").unwrap();
         // Diagonales completas desde d4 en tablero vacío: 13 casillas.
         assert_eq!(count_bits(tables().bishop_attacks(d4, EMPTY)), 13);
+    }
+
+    #[test]
+    fn magic_matches_ray_reference_on_sample_positions() {
+        // Comparación directa, en este mismo archivo, de la ruta activa
+        // (magic bitboards) contra la implementación de referencia por
+        // rayos, sobre varias ocupaciones representativas de una partida
+        // real (no aleatorias): posición inicial, kiwipete, y una posición
+        // con piezas dispersas. Complementa (no sustituye) la validación
+        // exhaustiva de src/magic.rs.
+        use crate::board::Board;
+        let positions = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        for fen in positions {
+            let board = Board::from_fen(fen).unwrap();
+            let occ = board.occupancy();
+            for sq in 0u8..64 {
+                assert_eq!(
+                    tables().rook_attacks(sq, occ),
+                    tables().rook_attacks_ray(sq, occ),
+                    "torre: magic vs rayos difieren en {sq} para {fen}"
+                );
+                assert_eq!(
+                    tables().bishop_attacks(sq, occ),
+                    tables().bishop_attacks_ray(sq, occ),
+                    "alfil: magic vs rayos difieren en {sq} para {fen}"
+                );
+            }
+        }
     }
 }
