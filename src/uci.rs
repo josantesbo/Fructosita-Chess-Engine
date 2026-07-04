@@ -1,10 +1,15 @@
 //! Bucle del protocolo UCI (Universal Chess Interface).
 //!
-//! La búsqueda corre en un hilo separado del bucle principal de lectura de
-//! stdin: así, si llega un comando `stop` mientras el motor está pensando,
-//! el hilo principal puede procesarlo de inmediato (activando una bandera
-//! atómica que el hilo de búsqueda revisa periódicamente) en vez de quedar
-//! bloqueado esperando a que termine la búsqueda.
+//! La búsqueda corre en un hilo "orquestador" separado del bucle principal
+//! de lectura de stdin: así, si llega un comando `stop` mientras el motor
+//! está pensando, el hilo principal puede procesarlo de inmediato
+//! (activando una bandera atómica que todos los hilos de búsqueda revisan
+//! periódicamente) en vez de quedar bloqueado esperando a que termine.
+//!
+//! Con `Threads > 1` (Lazy SMP), ese hilo orquestador a su vez lanza varios
+//! hilos de búsqueda que comparten la misma tabla de transposición
+//! (`Arc<TranspositionTable>`, segura para acceso concurrente — ver
+//! `tt.rs`) y la misma bandera de `stop`.
 
 use crate::board::Board;
 use crate::book::{Book, BookRng};
@@ -22,15 +27,17 @@ use std::time::{Duration, Instant};
 pub const ENGINE_NAME: &str = "Fructosita 1.0 Aldosa";
 pub const ENGINE_AUTHOR: &str = "Antonio";
 const DEFAULT_HASH_MB: usize = 64;
+const DEFAULT_THREADS: usize = 1;
 
 struct EngineState {
     board: Board,
     /// Hashes de todas las posiciones desde el inicio de la partida hasta
     /// la posición actual, inclusive. Se usa para detectar repeticiones.
     game_history: Vec<u64>,
-    tt: Option<TranspositionTable>,
+    tt: Arc<TranspositionTable>,
+    threads: usize,
     stop_flag: Arc<AtomicBool>,
-    search_thread: Option<JoinHandle<TranspositionTable>>,
+    search_thread: Option<JoinHandle<()>>,
     book: Option<Book>,
     own_book: bool,
     book_rng: BookRng,
@@ -46,7 +53,8 @@ impl EngineState {
         EngineState {
             game_history: vec![board.hash],
             board,
-            tt: Some(TranspositionTable::new(DEFAULT_HASH_MB)),
+            tt: Arc::new(TranspositionTable::new(DEFAULT_HASH_MB)),
+            threads: DEFAULT_THREADS,
             stop_flag: Arc::new(AtomicBool::new(false)),
             search_thread: None,
             book: None,
@@ -56,16 +64,14 @@ impl EngineState {
     }
 }
 
-/// Si hay una búsqueda en curso, la detiene y espera a que termine,
-/// recuperando la tabla de transposición para poder reutilizarla. Se llama
-/// antes de procesar `position`, `go`, `ucinewgame` o `setoption`, para
-/// evitar que un comando pise a una búsqueda que aún no ha terminado.
+/// Si hay una búsqueda en curso, la detiene y espera a que termine (une el
+/// hilo orquestador). Se llama antes de procesar `position`, `go`,
+/// `ucinewgame` o `setoption`, para evitar que un comando pise a una
+/// búsqueda que aún no ha terminado.
 fn ensure_search_finished(state: &mut EngineState) {
     if let Some(handle) = state.search_thread.take() {
         state.stop_flag.store(true, Ordering::Relaxed);
-        if let Ok(tt) = handle.join() {
-            state.tt = Some(tt);
-        }
+        let _ = handle.join();
         state.stop_flag.store(false, Ordering::Relaxed);
     }
 }
@@ -90,6 +96,7 @@ pub fn run() {
                 println!("id name {ENGINE_NAME}");
                 println!("id author {ENGINE_AUTHOR}");
                 println!("option name Hash type spin default {DEFAULT_HASH_MB} min 1 max 4096");
+                println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 64");
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
                 println!("uciok");
@@ -99,9 +106,7 @@ pub fn run() {
                 ensure_search_finished(&mut state);
                 state.board = Board::start_pos();
                 state.game_history = vec![state.board.hash];
-                if let Some(tt) = state.tt.as_mut() {
-                    tt.clear();
-                }
+                state.tt.clear();
             }
             "position" => {
                 ensure_search_finished(&mut state);
@@ -199,9 +204,15 @@ fn handle_setoption(line: &str, state: &mut EngineState) {
 
     if name.eq_ignore_ascii_case("Hash") {
         if let Ok(mb) = value.parse::<usize>() {
-            if let Some(tt) = state.tt.as_mut() {
-                tt.resize(mb.max(1));
-            }
+            // No hace falta &mut: simplemente apuntamos a una tabla nueva.
+            // Cualquier hilo que aún tuviera un Arc a la tabla vieja (no
+            // debería, gracias a ensure_search_finished) seguiría viéndola
+            // intacta; nadie más la referenciará desde aquí en adelante.
+            state.tt = Arc::new(TranspositionTable::new(mb.max(1)));
+        }
+    } else if name.eq_ignore_ascii_case("Threads") {
+        if let Ok(n) = value.parse::<usize>() {
+            state.threads = n.clamp(1, 64);
         }
     } else if name.eq_ignore_ascii_case("OwnBook") {
         state.own_book = value.eq_ignore_ascii_case("true");
@@ -241,7 +252,11 @@ fn handle_go(line: &str, state: &mut EngineState) {
         if let Some(book) = &state.book {
             let candidates = book.probe(&state.board);
             if let Some(mv) = crate::book::choose_weighted(&candidates, &mut state.book_rng) {
-                println!("info string jugada de libro ({} candidata{})", candidates.len(), if candidates.len() == 1 { "" } else { "s" });
+                println!(
+                    "info string jugada de libro ({} candidata{})",
+                    candidates.len(),
+                    if candidates.len() == 1 { "" } else { "s" }
+                );
                 println!("bestmove {mv}");
                 return;
             }
@@ -283,15 +298,15 @@ fn handle_go(line: &str, state: &mut EngineState) {
 
     state.stop_flag.store(false, Ordering::Relaxed);
     let stop_flag = Arc::clone(&state.stop_flag);
+    let tt = Arc::clone(&state.tt);
     let board = state.board;
     let game_history = state.game_history.clone();
-    let mut tt = state.tt.take().unwrap_or_else(|| TranspositionTable::new(DEFAULT_HASH_MB));
+    let threads = state.threads;
 
     let handle = thread::spawn(move || {
-        let (best_move, _score) = search::iterative_deepening(&board, limits, &mut tt, game_history, &stop_flag);
+        let (best_move, _score) = search::lazy_smp_search(board, limits, tt, game_history, stop_flag, threads);
         println!("bestmove {best_move}");
         io::stdout().flush().ok();
-        tt
     });
     state.search_thread = Some(handle);
 }

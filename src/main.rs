@@ -7,12 +7,13 @@
 //!     fructosita perft <profundidad> ["<fen>"]
 //!     fructosita perft 5
 //!     fructosita perft 4 "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
-//!     fructosita selfplay <plies> [movetime_ms]
+//!     fructosita selfplay <plies> [movetime_ms] [threads]
 //!         Hace que el motor juegue contra sí mismo N medio-movimientos,
 //!         verificando en cada paso que el movimiento elegido es legal.
 //!         Sirve como prueba de estabilidad de extremo a extremo (hash,
-//!         TT, historial de repetición, búsqueda) más allá de perft, que
-//!         solo valida la generación de movimientos.
+//!         TT, historial de repetición, búsqueda, y desde Lazy SMP,
+//!         concurrencia entre hilos) más allá de perft, que solo valida
+//!         la generación de movimientos.
 
 mod bitboard;
 mod board;
@@ -84,13 +85,14 @@ fn run_cli_perft(args: &[String]) {
 fn run_selfplay(args: &[String]) {
     let plies: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(40);
     let movetime_ms: u64 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(200);
+    let threads: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
 
     let mut board = Board::start_pos();
     let mut history = vec![board.hash];
-    let mut tt = TranspositionTable::new(32);
-    let stop = AtomicBool::new(false);
+    let tt = std::sync::Arc::new(TranspositionTable::new(32));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
 
-    println!("Auto-juego: {plies} medios-movimientos, {movetime_ms}ms por jugada\n");
+    println!("Auto-juego: {plies} medios-movimientos, {movetime_ms}ms por jugada, {threads} hilo(s)\n");
 
     for ply in 1..=plies {
         let legal = generate_legal_moves(&board);
@@ -106,7 +108,7 @@ fn run_selfplay(args: &[String]) {
             soft_deadline: now + Duration::from_millis(movetime_ms),
             hard_deadline: now + Duration::from_millis(movetime_ms * 3),
         };
-        let (mv, score) = search::iterative_deepening(&board, limits, &mut tt, history.clone(), &stop);
+        let (mv, score) = search::lazy_smp_search(board, limits, tt.clone(), history.clone(), stop.clone(), threads);
 
         if !legal.contains(&mv) {
             panic!("¡BUG CRÍTICO! El motor devolvió un movimiento ilegal: {mv} en posición {}", board.to_fen());
