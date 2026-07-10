@@ -1,10 +1,8 @@
 //! Seguridad del rey: heurística ligera sobre columnas abiertas/semi-abiertas.
 
-use crate::bitboard::EMPTY;
+use crate::bitboard::{file_mask, EMPTY};
 use crate::board::Board;
 use crate::types::*;
-
-const FILE_A: u64 = 0x0101010101010101;
 
 /// Heurística ligera: penaliza columnas abiertas/semi-abiertas junto al rey
 /// cuando este todavía está cerca de su casa (aprox. "sigue enrocado o sin
@@ -27,8 +25,7 @@ pub fn king_safety(board: &Board, color: Color) -> i32 {
     let lo = file.saturating_sub(1);
     let hi = (file + 1).min(7);
     for f in lo..=hi {
-        let file_mask: u64 = FILE_A << f;
-        if own_pawns & file_mask == EMPTY {
+        if own_pawns & file_mask(f) == EMPTY {
             score -= 15;
         }
     }

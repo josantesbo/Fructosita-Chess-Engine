@@ -1,12 +1,12 @@
 //! Representación de bitboards y tablas de ataque precalculadas.
 //!
-//! Las piezas deslizantes (alfil/torre/dama) usan el método clásico de "rayos
-//! con primer bloqueador": se precalcula el rayo completo en cada una de las
-//! 8 direcciones para cada casilla, y en tiempo de ejecución se recorta el
-//! rayo en el primer bloqueador encontrado. Es más simple y fácil de
-//! verificar que magic bitboards; la optimización a magic bitboards queda
-//! planeada para una fase posterior una vez que la velocidad sea el cuello
-//! de botella (autojuego / búsqueda profunda).
+//! Las piezas deslizantes (alfil/torre/dama) usan magic bitboards (ver
+//! `src/magic.rs`) en la ruta rápida del motor: `bishop_attacks`/
+//! `rook_attacks`/`queen_attacks` delegan ahí. El método clásico de "rayos
+//! con primer bloqueador" (`bishop_attacks_ray`/`rook_attacks_ray`, más
+//! simple y fácil de verificar, pero más lento) también vive aquí, no como
+//! ruta de producción, sino como oráculo de referencia independiente para
+//! tests y para el diagnóstico `bench-attacks`.
 
 use crate::types::{file_of, make_square, rank_of, Color, Square};
 use std::sync::OnceLock;
@@ -14,6 +14,19 @@ use std::sync::OnceLock;
 pub type Bitboard = u64;
 
 pub const EMPTY: Bitboard = 0;
+
+/// Columna "a" completa (a1..a8). Desplazada `<< file` da la columna
+/// correspondiente a cualquier otro índice de columna (0=a .. 7=h).
+const FILE_A: Bitboard = 0x0101010101010101;
+
+/// Bitboard con todas las casillas de la columna `file` (0=a .. 7=h)
+/// activadas. Útil para evaluación (peones doblados/aislados, columnas
+/// abiertas para torres, seguridad del rey) y en general para cualquier
+/// cálculo "por columna".
+#[inline(always)]
+pub fn file_mask(file: u8) -> Bitboard {
+    FILE_A << file
+}
 
 #[inline(always)]
 pub fn set_bit(bb: Bitboard, sq: Square) -> Bitboard {

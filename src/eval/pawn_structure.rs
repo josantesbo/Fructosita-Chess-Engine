@@ -1,10 +1,8 @@
 //! Estructura de peones: doblados, aislados, y pasados.
 
-use crate::bitboard::{count_bits, get_bit, pop_lsb, EMPTY};
+use crate::bitboard::{count_bits, file_mask, get_bit, pop_lsb, EMPTY};
 use crate::board::Board;
 use crate::types::*;
-
-const FILE_A: u64 = 0x0101010101010101;
 
 pub fn pawn_structure(board: &Board, color: Color) -> (i32, i32) {
     let own_pawns = board.pieces[color.index()][PieceType::Pawn.index()];
@@ -13,8 +11,7 @@ pub fn pawn_structure(board: &Board, color: Color) -> (i32, i32) {
     let mut eg = 0;
 
     for file in 0u8..8 {
-        let file_mask: u64 = FILE_A << file;
-        let count_on_file = count_bits(own_pawns & file_mask) as i32;
+        let count_on_file = count_bits(own_pawns & file_mask(file)) as i32;
         if count_on_file > 1 {
             mg -= 10 * (count_on_file - 1);
             eg -= 20 * (count_on_file - 1);
@@ -22,10 +19,10 @@ pub fn pawn_structure(board: &Board, color: Color) -> (i32, i32) {
         if count_on_file > 0 {
             let mut adjacent: u64 = 0;
             if file > 0 {
-                adjacent |= FILE_A << (file - 1);
+                adjacent |= file_mask(file - 1);
             }
             if file < 7 {
-                adjacent |= FILE_A << (file + 1);
+                adjacent |= file_mask(file + 1);
             }
             if own_pawns & adjacent == EMPTY {
                 mg -= 12;
