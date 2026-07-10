@@ -8,7 +8,6 @@
 //!   - `mobility`: movilidad (nº de casillas atacadas).
 //!   - `pawn_structure`: estructura de peones (doblados, aislados, pasados).
 //!   - `king_safety`: columnas abiertas cerca del rey.
-//!   - `rook_activity`: bono de torre en columna abierta/semi-abierta.
 //!
 //! Se organiza como un término por archivo (en vez de un único eval.rs
 //! monolítico) a propósito: el plan de evaluación artesanal (HCE) de
@@ -20,7 +19,6 @@ mod king_safety;
 mod material;
 mod mobility;
 mod pawn_structure;
-mod rook_activity;
 
 use crate::board::Board;
 use crate::types::Color;
@@ -28,7 +26,6 @@ use king_safety::king_safety;
 use material::{game_phase, material_and_pst, MAX_PHASE};
 use mobility::mobility;
 use pawn_structure::pawn_structure;
-use rook_activity::rook_activity;
 
 pub use material::piece_value;
 
@@ -42,11 +39,9 @@ pub fn evaluate(board: &Board) -> i32 {
     let (bp_mg, bp_eg) = pawn_structure(board, Color::Black);
     let wk = king_safety(board, Color::White);
     let bk = king_safety(board, Color::Black);
-    let (wr_mg, wr_eg) = rook_activity(board, Color::White);
-    let (br_mg, br_eg) = rook_activity(board, Color::Black);
 
-    let mg = (w_mg + wm_mg + wp_mg + wk + wr_mg) - (b_mg + bm_mg + bp_mg + bk + br_mg);
-    let eg = (w_eg + wm_eg + wp_eg + wr_eg) - (b_eg + bm_eg + bp_eg + br_eg);
+    let mg = (w_mg + wm_mg + wp_mg + wk) - (b_mg + bm_mg + bp_mg + bk);
+    let eg = (w_eg + wm_eg + wp_eg) - (b_eg + bm_eg + bp_eg);
 
     let phase = game_phase(board);
     let score = (mg * phase + eg * (MAX_PHASE - phase)) / MAX_PHASE;
