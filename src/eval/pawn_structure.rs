@@ -2,9 +2,10 @@
 
 use crate::bitboard::{count_bits, file_mask, get_bit, pop_lsb, EMPTY};
 use crate::board::Board;
+use crate::eval::score::Score;
 use crate::types::*;
 
-pub fn pawn_structure(board: &Board, color: Color) -> (i32, i32) {
+pub fn pawn_structure(board: &Board, color: Color) -> Score {
     let own_pawns = board.pieces[color.index()][PieceType::Pawn.index()];
     let enemy_pawns = board.pieces[color.opposite().index()][PieceType::Pawn.index()];
     let mut mg = 0;
@@ -70,5 +71,5 @@ pub fn pawn_structure(board: &Board, color: Color) -> (i32, i32) {
         }
     }
 
-    (mg, eg)
+    Score::new(mg, eg)
 }

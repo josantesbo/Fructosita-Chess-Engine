@@ -2,9 +2,10 @@
 
 use crate::bitboard::{count_bits, pop_lsb, tables, EMPTY};
 use crate::board::Board;
+use crate::eval::score::Score;
 use crate::types::*;
 
-pub fn mobility(board: &Board, color: Color) -> (i32, i32) {
+pub fn mobility(board: &Board, color: Color) -> Score {
     let t = tables();
     let occ = board.occupancy();
     let own = board.color_occupancy(color);
@@ -31,5 +32,5 @@ pub fn mobility(board: &Board, color: Color) -> (i32, i32) {
         count += count_bits(t.queen_attacks(sq, occ) & !own) as i32;
     }
 
-    (count * 4, count * 3)
+    Score::new(count * 4, count * 3)
 }

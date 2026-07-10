@@ -8,6 +8,7 @@
 
 use crate::bitboard::{pop_lsb, EMPTY};
 use crate::board::Board;
+use crate::eval::score::Score;
 use crate::types::*;
 use std::sync::OnceLock;
 
@@ -102,7 +103,7 @@ pub fn game_phase(board: &Board) -> i32 {
     phase.min(MAX_PHASE)
 }
 
-pub fn material_and_pst(board: &Board, color: Color) -> (i32, i32) {
+pub fn material_and_pst(board: &Board, color: Color) -> Score {
     let p = pst();
     let mut mg = 0;
     let mut eg = 0;
@@ -120,5 +121,5 @@ pub fn material_and_pst(board: &Board, color: Color) -> (i32, i32) {
             eg += value + p.eg[pt.index()][idx as usize];
         }
     }
-    (mg, eg)
+    Score::new(mg, eg)
 }

@@ -123,6 +123,7 @@ pub fn run() {
                 handle_setoption(line, &mut state);
             }
             "d" => println!("{}", state.board),
+            "eval" => print!("{}", crate::eval::trace(&state.board)),
             "perft" => {
                 ensure_search_finished(&mut state);
                 let depth: u32 = line

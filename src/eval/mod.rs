@@ -2,7 +2,8 @@
 //!
 //! Devuelve una puntuación en centipeones **relativa a quien tiene el
 //! turno** (convención estándar para negamax: positivo = bueno para quien
-//! mueve). Combina, cada uno en su propio submódulo:
+//! mueve). Combina, cada uno en su propio submódulo, un [`Score`] (par
+//! mediojuego/final) por término:
 //!   - `material`: material + tablas posicionales (PST) con "tapered eval"
 //!     (interpola entre valores de medio juego y de final).
 //!   - `mobility`: movilidad (nº de casillas atacadas).
@@ -14,43 +15,83 @@
 //! Fructosita es seguir añadiendo términos durante bastante tiempo antes de
 //! considerar NNUE, y cada término nuevo debe poder añadirse, probarse y
 //! revisarse de forma aislada sin inflar un solo archivo.
+//!
+//! # Cómo añadir un término nuevo
+//! 1. Crear `src/eval/mi_termino.rs` con una función
+//!    `pub fn mi_termino(board: &Board, color: Color) -> Score` y sus
+//!    propios tests unitarios (ver `rook_activity.rs` en el historial de
+//!    git para un ejemplo ya usado, aunque revertido por no validar en
+//!    match — sigue siendo un buen modelo de cómo estructurar uno nuevo).
+//! 2. Declarar `mod mi_termino;` más abajo e importar la función.
+//! 3. Sumarla dentro de `evaluate_breakdown` (una sola vez: se resta
+//!    automáticamente para el bando contrario al construir `Breakdown`).
+//! 4. `cargo test`, `cargo bench`/`fructosita bench`, y solo si el match
+//!    contra la versión sin el término muestra una mejora estadísticamente
+//!    clara, se conserva — si no, se revierte sin excepción (ver README).
+//!
+//! `evaluate()` y `trace()` comparten una única función interna
+//! (`evaluate_breakdown`) para que ambos vean siempre exactamente los
+//! mismos números: si mañana se añade un término y alguien olvida
+//! actualizar el desglose de diagnóstico, no puede desincronizarse de lo
+//! que el motor realmente usa para jugar (el mismo tipo de bug que ya
+//! encontramos una vez entre `eval` y `see.rs`).
 
 mod king_safety;
 mod material;
 mod mobility;
 mod pawn_structure;
+mod score;
 
 use crate::board::Board;
 use crate::types::Color;
 use king_safety::king_safety;
+pub use material::piece_value;
 use material::{game_phase, material_and_pst, MAX_PHASE};
 use mobility::mobility;
 use pawn_structure::pawn_structure;
+pub use score::Score;
 
-pub use material::piece_value;
+/// Desglose completo de una evaluación: cada término, por bando, más el
+/// resultado final. Pensado para diagnóstico (comando UCI `eval`) y para
+/// que los tests puedan comprobar términos individuales sin repetir la
+/// lógica de combinación.
+pub struct Breakdown {
+    pub material: (Score, Score), // (blancas, negras)
+    pub mobility: (Score, Score),
+    pub pawn_structure: (Score, Score),
+    pub king_safety: (Score, Score),
+    pub phase: i32,
+    /// Score final en centipeones, idéntico al que devuelve `evaluate()`
+    /// para el mismo tablero (relativo a quien tiene el turno, con tempo).
+    pub score: i32,
+}
 
-/// Puntuación relativa a quien tiene el turno (positivo = bueno para el que mueve).
-pub fn evaluate(board: &Board) -> i32 {
-    let (w_mg, w_eg) = material_and_pst(board, Color::White);
-    let (b_mg, b_eg) = material_and_pst(board, Color::Black);
-    let (wm_mg, wm_eg) = mobility(board, Color::White);
-    let (bm_mg, bm_eg) = mobility(board, Color::Black);
-    let (wp_mg, wp_eg) = pawn_structure(board, Color::White);
-    let (bp_mg, bp_eg) = pawn_structure(board, Color::Black);
-    let wk = king_safety(board, Color::White);
-    let bk = king_safety(board, Color::Black);
+fn evaluate_breakdown(board: &Board) -> Breakdown {
+    let material = (
+        material_and_pst(board, Color::White),
+        material_and_pst(board, Color::Black),
+    );
+    let mobility = (mobility(board, Color::White), mobility(board, Color::Black));
+    let pawn_structure = (
+        pawn_structure(board, Color::White),
+        pawn_structure(board, Color::Black),
+    );
+    let king_safety = (
+        king_safety(board, Color::White),
+        king_safety(board, Color::Black),
+    );
 
-    let mg = (w_mg + wm_mg + wp_mg + wk) - (b_mg + bm_mg + bp_mg + bk);
-    let eg = (w_eg + wm_eg + wp_eg) - (b_eg + bm_eg + bp_eg);
+    let total = (material.0 + mobility.0 + pawn_structure.0 + king_safety.0)
+        - (material.1 + mobility.1 + pawn_structure.1 + king_safety.1);
 
     let phase = game_phase(board);
-    let score = (mg * phase + eg * (MAX_PHASE - phase)) / MAX_PHASE;
+    let tapered = total.interpolate(phase, MAX_PHASE);
 
     // Convertimos primero a la perspectiva de quien mueve...
     let relative = if board.side_to_move == Color::White {
-        score
+        tapered
     } else {
-        -score
+        -tapered
     };
 
     // ...y SOLO DESPUÉS sumamos el bono de tempo: así queda garantizado que
@@ -58,7 +99,57 @@ pub fn evaluate(board: &Board) -> i32 {
     // de la conversión (como se hacía originalmente) lo convertía en una
     // penalización para las negras en vez de un bono — bug real, detectado
     // por el test `evaluation_is_color_symmetric`.
-    relative + 10
+    let score = relative + 10;
+
+    Breakdown {
+        material,
+        mobility,
+        pawn_structure,
+        king_safety,
+        phase,
+        score,
+    }
+}
+
+/// Puntuación relativa a quien tiene el turno (positivo = bueno para el que mueve).
+pub fn evaluate(board: &Board) -> i32 {
+    evaluate_breakdown(board).score
+}
+
+/// Desglose legible en texto de la evaluación de `board`, término por
+/// término y bando por bando: para el comando de diagnóstico UCI `eval`
+/// (ver `uci.rs`), pensado para verificar "a ojo" que un término nuevo
+/// aporta lo que se espera antes de someterlo a bench/match.
+pub fn trace(board: &Board) -> String {
+    let b = evaluate_breakdown(board);
+    let mut out = String::new();
+    out.push_str("Término            MG(W)   MG(B)   EG(W)   EG(B)\n");
+    let row = |out: &mut String, name: &str, w: Score, black: Score| {
+        out.push_str(&format!(
+            "{name:<18}{:>6}  {:>6}  {:>6}  {:>6}\n",
+            w.mg, black.mg, w.eg, black.eg
+        ));
+    };
+    row(&mut out, "Material + PST", b.material.0, b.material.1);
+    row(&mut out, "Movilidad", b.mobility.0, b.mobility.1);
+    row(
+        &mut out,
+        "Estructura peones",
+        b.pawn_structure.0,
+        b.pawn_structure.1,
+    );
+    row(
+        &mut out,
+        "Seguridad del rey",
+        b.king_safety.0,
+        b.king_safety.1,
+    );
+    out.push_str(&format!("Fase de partida: {}/{}\n", b.phase, MAX_PHASE));
+    out.push_str(&format!(
+        "Score final (perspectiva de quien mueve, con tempo): {} cp\n",
+        b.score
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -91,6 +182,29 @@ mod tests {
         let far = Board::from_fen("4k3/8/8/8/8/8/P7/4K3 w - - 0 1").unwrap();
         let close = Board::from_fen("4k3/P7/8/8/8/8/8/4K3 w - - 0 1").unwrap();
         assert!(evaluate(&close) > evaluate(&far));
+    }
+
+    #[test]
+    fn trace_score_always_matches_evaluate() {
+        // trace() y evaluate() comparten evaluate_breakdown(): este test
+        // documenta esa garantía y la protege de una futura refactorización
+        // que accidentalmente les haga calcular el número por caminos
+        // distintos (el mismo tipo de bug de "dos fuentes de verdad" que ya
+        // corregimos una vez entre `eval` y `see.rs`).
+        let positions = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r1bqk2r/2pp1ppp/p1n2n2/1pb1p3/4P3/1B3N2/PPPP1PPP/RNBQ1RK1 w kq - 0 8",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        for fen in positions {
+            let board = Board::from_fen(fen).unwrap();
+            assert_eq!(evaluate_breakdown(&board).score, evaluate(&board));
+            // trace() no debe entrar en pánico y debe mencionar cada término.
+            let text = trace(&board);
+            assert!(text.contains("Material"));
+            assert!(text.contains("Movilidad"));
+            assert!(text.contains("Seguridad del rey"));
+        }
     }
 
     /// Convierte un FEN en su "espejo": tablero volteado verticalmente,
