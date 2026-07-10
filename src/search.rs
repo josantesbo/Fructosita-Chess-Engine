@@ -30,6 +30,15 @@ pub struct SearchStats {
     pub tt_hits: AtomicU64,
     pub tt_cutoffs: AtomicU64,
     pub beta_cutoffs: AtomicU64,
+    /// De `beta_cutoffs`, cuántos ocurrieron en el primerísimo movimiento
+    /// probado en ese nodo. Métrica estándar de calidad de ordenamiento de
+    /// movimientos: `beta_cutoffs_first_move / beta_cutoffs` cerca de 1.0
+    /// (>90% en motores bien afinados) significa que el movimiento que
+    /// probamos primero casi siempre es el correcto; un valor bajo señala
+    /// que el ordenamiento (TT move, SEE, killers, historial) está dejando
+    /// pasar la mejor jugada y la búsqueda desperdicia nodos explorando
+    /// alternativas peores antes de encontrarla.
+    pub beta_cutoffs_first_move: AtomicU64,
     pub null_move_attempts: AtomicU64,
     pub null_move_cutoffs: AtomicU64,
     pub lmr_attempts: AtomicU64,
@@ -45,6 +54,7 @@ pub struct SearchStatsSnapshot {
     pub tt_hits: u64,
     pub tt_cutoffs: u64,
     pub beta_cutoffs: u64,
+    pub beta_cutoffs_first_move: u64,
     pub null_move_attempts: u64,
     pub null_move_cutoffs: u64,
     pub lmr_attempts: u64,
@@ -61,6 +71,7 @@ impl SearchStats {
             tt_hits: self.tt_hits.load(Ordering::Relaxed),
             tt_cutoffs: self.tt_cutoffs.load(Ordering::Relaxed),
             beta_cutoffs: self.beta_cutoffs.load(Ordering::Relaxed),
+            beta_cutoffs_first_move: self.beta_cutoffs_first_move.load(Ordering::Relaxed),
             null_move_attempts: self.null_move_attempts.load(Ordering::Relaxed),
             null_move_cutoffs: self.null_move_cutoffs.load(Ordering::Relaxed),
             lmr_attempts: self.lmr_attempts.load(Ordering::Relaxed),
@@ -488,6 +499,11 @@ fn negamax(
         }
         if alpha >= beta {
             ctx.stats.beta_cutoffs.fetch_add(1, Ordering::Relaxed);
+            if i == 0 {
+                ctx.stats
+                    .beta_cutoffs_first_move
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             if !mv.is_capture() {
                 ctx.store_killer(ply, mv);
                 ctx.bump_history(board.side_to_move, mv, depth);
@@ -716,6 +732,29 @@ mod tests {
             hard_deadline: Instant::now() + Duration::from_secs(30),
         };
         lazy_smp_search(board, limits, tt, vec![board.hash], stop, 1)
+    }
+
+    #[test]
+    fn beta_cutoffs_first_move_is_a_subset_of_beta_cutoffs() {
+        // No es una posición especial, cualquier búsqueda con profundidad
+        // suficiente para generar podas beta sirve: lo único que importa es
+        // que el subconjunto "cutoff en el primerísimo movimiento" nunca
+        // pueda superar al total de cutoffs, y que en una posición de
+        // apertura normal (donde el ordenamiento por TT/SEE/killers/
+        // historial funciona razonablemente bien) SÍ se registren algunos.
+        let board = Board::start_pos();
+        let tt = Arc::new(TranspositionTable::new(16));
+        let (_, _, stats) = search_fixed_depth_with_stats(board, 6, tt, vec![board.hash]);
+        assert!(
+            stats.beta_cutoffs_first_move <= stats.beta_cutoffs,
+            "cutoffs en primer movimiento ({}) no puede superar el total de cutoffs ({})",
+            stats.beta_cutoffs_first_move,
+            stats.beta_cutoffs
+        );
+        assert!(
+            stats.beta_cutoffs_first_move > 0,
+            "se esperaban algunos cutoffs en el primer movimiento probado"
+        );
     }
 
     #[test]
