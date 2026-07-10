@@ -27,6 +27,8 @@ use material::{game_phase, material_and_pst, MAX_PHASE};
 use mobility::mobility;
 use pawn_structure::pawn_structure;
 
+pub use material::piece_value;
+
 /// Puntuación relativa a quien tiene el turno (positivo = bueno para el que mueve).
 pub fn evaluate(board: &Board) -> i32 {
     let (w_mg, w_eg) = material_and_pst(board, Color::White);

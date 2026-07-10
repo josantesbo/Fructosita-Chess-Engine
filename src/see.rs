@@ -19,21 +19,19 @@ use crate::board::Board;
 use crate::moves::{Move, MoveKind};
 use crate::types::*;
 
-/// Valores usados específicamente para SEE. Coinciden con `eval::piece_value`
-/// para peón..dama (misma escala de centipeones que el resto del motor),
-/// pero el rey recibe un valor artificialmente alto en vez de 0: aquí lo que
-/// nos interesa es "qué tan cara es esta pieza si la pierdo en el
-/// intercambio", así que el rey debe ser siempre la última pieza elegida
+/// Valores usados específicamente para SEE. Para peón..dama reutiliza
+/// directamente `eval::piece_value` (misma fuente de verdad que el resto
+/// del motor: si mañana se retunean los valores de material en `eval`, SEE
+/// los sigue automáticamente en vez de quedar desincronizado en silencio).
+/// El rey es la única excepción real: aquí nos interesa "qué tan cara es
+/// esta pieza si la pierdo en el intercambio", así que debe recibir un
+/// valor artificialmente alto para ser siempre la última pieza elegida
 /// como atacante, nunca la primera (al contrario que en `eval`, donde el
 /// rey vale 0 porque ambos bandos siempre tienen uno y se cancela).
 fn see_piece_value(pt: PieceType) -> i32 {
     match pt {
-        PieceType::Pawn => 100,
-        PieceType::Knight => 320,
-        PieceType::Bishop => 330,
-        PieceType::Rook => 500,
-        PieceType::Queen => 900,
         PieceType::King => 20_000,
+        other => crate::eval::piece_value(other),
     }
 }
 
