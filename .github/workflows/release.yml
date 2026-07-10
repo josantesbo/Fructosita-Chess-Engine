@@ -1,0 +1,56 @@
+name: Release
+
+# Se dispara al crear un tag con forma "v1.0", "v1.2.3", etc.
+# (por ejemplo: git tag v1.0 && git push origin v1.0)
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Compilar (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            artifact_name: fructosita
+            asset_name: fructosita-linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+            artifact_name: fructosita.exe
+            asset_name: fructosita-windows-x86_64.exe
+          - os: macos-latest
+            name: macos-arm64
+            artifact_name: fructosita
+            asset_name: fructosita-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust estable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Compilar en modo release
+        run: cargo build --release --verbose
+
+      - name: Correr tests
+        run: cargo test --verbose
+
+      - name: Preparar binario para publicar
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }}
+
+      - name: Subir como artefacto de release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset_name }}
+          generate_release_notes: true

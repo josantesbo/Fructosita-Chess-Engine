@@ -1,0 +1,22 @@
+[package]
+name = "fructosita"
+version = "1.2.0"
+edition = "2021"
+authors = ["Antonio Espinosa"]
+description = "Fructosita - motor de ajedrez UCI original, desarrollado desde cero en Rust."
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jordiqui/Fructosita-Chess-Engine"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[[bin]]
+name = "fructosita"
+path = "src/main.rs"

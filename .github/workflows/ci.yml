@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  test:
+    name: Build & test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Rust estable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cachear dependencias de Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test --verbose
+
+      - name: cargo build --release
+        run: cargo build --release --verbose
+
+      - name: Verificar perft (validación de generación de movimientos)
+        run: |
+          ./target/release/fructosita perft 6
+          # Perft(6) desde la posición inicial debe dar exactamente 119060324
+          # (valor de referencia público, Chess Programming Wiki).
+          test "$(./target/release/fructosita perft 6 | grep -o 'Perft(6) = [0-9]*' | grep -o '[0-9]*$')" = "119060324"
+
+      - name: Verificar bench reproducible
+        run: ./target/release/fructosita bench depth 5
+
+      - name: Verificar auto-juego (estabilidad de extremo a extremo)
+        run: ./target/release/fructosita selfplay 40 50
+
+      - name: Verificar harness de partidas/regresión
+        run: scripts/run_match_smoke.sh
