@@ -1,7 +1,7 @@
 //! Herramienta de desarrollo, NO forma parte del motor en tiempo de
 //! ejecución: busca números mágicos propios para las piezas deslizantes
 //! (torre y alfil) en las 64 casillas, y los imprime en formato Rust listo
-//! para copiar a `src/magic.rs`.
+//! para copiar a `src/magic_constants.rs`.
 //!
 //! Se incluye en el repositorio para que cualquiera pueda reproducir la
 //! búsqueda de forma independiente y confirmar que estos números no fueron
