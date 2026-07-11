@@ -1,0 +1,13 @@
+# Suite semilla "estratégica" para el arnés EPD.
+#
+# Nota honesta: la táctica pura y los finales forzados se pueden verificar
+# a mano con certeza total (basta la aritmética de coordenadas y las
+# reglas de movimiento). El juicio posicional fino es mucho más difícil de
+# certificar sin una base de datos o un motor de referencia externo, así
+# que esta suite arranca deliberadamente pequeña y centrada en disciplina
+# material (no capturar peones envenenados) en vez de valoraciones
+# posicionales subjetivas. Buen candidato para ampliar con posiciones
+# reales de partidas propias en vez de inventar más a mano.
+
+2b1k3/3p4/8/4N3/8/8/8/4K3 w - - am Nxd7; id "strategic.01 avoid a bad trade (knight for pawn, bishop recaptures)";
+4k3/8/8/8/4n3/8/3P4/2B1K3 b - - am Nxd2; id "strategic.02 same idea, black to move (also exercises side-to-move handling)";

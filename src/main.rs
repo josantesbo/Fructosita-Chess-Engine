@@ -16,11 +16,18 @@
 //!         TT, historial de repetición, búsqueda, y desde Lazy SMP,
 //!         concurrencia entre hilos) más allá de perft, que solo valida
 //!         la generación de movimientos.
+//!     fructosita epd <archivo.epd> [depth <profundidad>]
+//!         Corre una suite de posiciones EPD (ver `testdata/epd/`) a
+//!         profundidad fija y determinista, comparando la jugada elegida
+//!         contra las anotaciones `bm`/`am` de cada posición. Pensado para
+//!         detectar regresiones tácticas/posicionales obvias en segundos,
+//!         antes de comprometer horas en un match de fastchess.
 
 mod bitboard;
 mod board;
 mod book;
 mod commands;
+mod epd;
 mod eval;
 mod magic;
 mod magic_constants;
@@ -55,6 +62,10 @@ fn main() {
     }
     if args.len() > 1 && args[1] == "bench-attacks" {
         commands::run_bench_attacks();
+        return;
+    }
+    if args.len() > 1 && args[1] == "epd" {
+        commands::run_epd(&args[2..]);
         return;
     }
 

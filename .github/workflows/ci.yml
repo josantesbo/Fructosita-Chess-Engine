@@ -44,5 +44,11 @@ jobs:
       - name: Verificar auto-juego (estabilidad de extremo a extremo)
         run: ./target/release/fructosita selfplay 40 50
 
+      - name: Verificar suites EPD (regresión táctica/estratégica/finales)
+        run: |
+          ./target/release/fructosita epd testdata/epd/tactics.epd depth 8
+          ./target/release/fructosita epd testdata/epd/endgames.epd depth 8
+          ./target/release/fructosita epd testdata/epd/strategic.epd depth 8
+
       - name: Verificar harness de partidas/regresión
         run: scripts/run_match_smoke.sh

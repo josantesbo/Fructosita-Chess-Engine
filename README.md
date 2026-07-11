@@ -149,8 +149,14 @@ Fructosita includes an extensive automated test suite covering:
 Current status:
 
 ```
-52 tests passed
+84 tests passed
 0 failed
+```
+
+On top of `cargo test`, there's an EPD harness (`fructosita epd <archivo.epd> [depth N]`) that runs a suite of positions at fixed, deterministic depth and checks the chosen move against each position's `bm`/`am` annotations — a fast (seconds, not hours) sanity check for tactical/positional/endgame regressions, meant to run *before* committing time to a full fastchess match. A small hand-verified seed suite lives in `testdata/epd/` (`tactics.epd`, `endgames.epd`, `strategic.epd`) and runs in CI; it accepts any standard EPD file, not just the ones included here.
+
+```
+./target/release/fructosita epd testdata/epd/tactics.epd depth 8
 ```
 
 ---

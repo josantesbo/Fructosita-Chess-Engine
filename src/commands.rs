@@ -1,11 +1,12 @@
 //! Subcomandos de línea de comandos (fuera del protocolo UCI): `perft`,
-//! `bench`, `selfplay`, `bench-attacks`. Se mantienen separados de `main.rs`
-//! (que solo hace el despacho inicial) y del bucle UCI (`uci.rs`) porque no
-//! son parte del protocolo del motor: son herramientas de diagnóstico y
-//! validación reproducible para desarrollo/CI.
+//! `bench`, `selfplay`, `bench-attacks`, `epd`. Se mantienen separados de
+//! `main.rs` (que solo hace el despacho inicial) y del bucle UCI (`uci.rs`)
+//! porque no son parte del protocolo del motor: son herramientas de
+//! diagnóstico y validación reproducible para desarrollo/CI.
 
 use crate::bitboard::tables;
 use crate::board::Board;
+use crate::epd;
 use crate::movegen::generate_legal_moves;
 use crate::perft;
 use crate::search::{self, SearchLimits};
@@ -239,4 +240,66 @@ pub fn run_bench_attacks() {
 
     let ratio = ray_elapsed.as_secs_f64() / magic_elapsed.as_secs_f64();
     println!("magic es {ratio:.2}x respecto a rayos en este micro-benchmark aislado");
+}
+
+/// Corre una suite EPD (ver `epd.rs`) a profundidad fija y determinista.
+/// Sale con código de proceso 1 si hubo errores de parseo o al menos una
+/// posición falló, para que se pueda enganchar directamente en CI.
+pub fn run_epd(args: &[String]) {
+    let Some(path) = args.first() else {
+        eprintln!("uso: fructosita epd <archivo.epd> [depth <profundidad>]");
+        std::process::exit(1);
+    };
+    let depth: i32 = if args.get(1).map(|s| s.as_str()) == Some("depth") {
+        args.get(2).and_then(|s| s.parse().ok()).unwrap_or(6)
+    } else {
+        6
+    };
+
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("no se pudo leer '{path}': {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let (positions, parse_errors) = epd::parse_epd_file(&contents);
+    for err in &parse_errors {
+        eprintln!("error de parseo: {err}");
+    }
+    if positions.is_empty() {
+        eprintln!("ninguna posición válida en '{path}'");
+        std::process::exit(1);
+    }
+
+    println!("epd suite {path}");
+    println!("epd depth {depth}");
+
+    let start = Instant::now();
+    let summary = epd::run_suite(&positions, depth);
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let mut total_nodes = 0u64;
+    for outcome in &summary.outcomes {
+        let status = if outcome.passed { "PASS" } else { "FAIL" };
+        let name = outcome.id.as_deref().unwrap_or("<sin id>");
+        total_nodes += outcome.nodes;
+        println!(
+            "[{status}] {name}: jugada {} (nodos {}) — {}",
+            outcome.chosen, outcome.nodes, outcome.fen
+        );
+    }
+
+    println!(
+        "epd result {}/{} ({:.1}%) en {:.2}s, {total_nodes} nodos totales",
+        summary.passed,
+        summary.total,
+        100.0 * summary.passed as f64 / summary.total as f64,
+        elapsed
+    );
+
+    if !parse_errors.is_empty() || summary.passed < summary.total {
+        std::process::exit(1);
+    }
 }

@@ -1,0 +1,9 @@
+# Suite semilla de finales para el arnés EPD. Técnica elemental forzada
+# (mates simples, promoción sin oposición posible) elegida deliberadamente
+# por encima de teoría de oposición/casillas clave: es más fácil de
+# verificar sin ambigüedad a mano que posiciones que dependen de juicio
+# posicional fino.
+
+k7/8/1K6/8/8/8/8/7R w - - bm Rh8+; id "endgames.01 KR vs K corner mate in 1";
+8/7P/8/8/8/k7/8/6K1 w - - bm h8=Q; id "endgames.02 forced promotion, nothing can stop it";
+k7/7Q/1K6/8/8/8/8/8 w - - bm Qa7+; id "endgames.03 KQ vs K mate in 1, avoiding the stalemate trap";

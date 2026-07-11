@@ -1,0 +1,20 @@
+# Suite semilla de táctica para el arnés EPD (`fructosita epd <archivo> [depth N]`).
+#
+# Posiciones construidas y verificadas a mano para esta suite (no
+# transcritas de ninguna suite publicada como WAC/STS, para evitar
+# cualquier riesgo de error de transcripción sin poder contrastarlas
+# contra la fuente original). Varias reutilizan posiciones ya validadas
+# por los propios tests de `search.rs` (mate en 1, SEE), lo cual las hace
+# un buen centinela de regresión: si esto falla, algo se rompió de verdad.
+#
+# Formato EPD estándar: cualquier archivo .epd de terceros (WAC, STS,
+# Arasan, etc.) también debería funcionar tal cual con este arnés.
+
+4k3/8/8/3r4/8/8/8/3QK3 w - - bm Qxd5; id "tactics.01 hanging rook";
+6k1/5ppp/8/8/8/8/8/4R1K1 w - - bm Re8+; id "tactics.02 back rank mate in 1";
+3rk3/8/8/8/8/8/8/3QK3 w - - am Qxd8; id "tactics.03 avoid trading queen for defended rook";
+3r3k/8/8/8/8/8/8/3QK3 w - - bm Qxd8; id "tactics.04 take the undefended rook";
+4k3/8/8/8/n7/8/8/R3K3 w - - bm Rxa4; id "tactics.05 hanging knight on the rook file";
+4k3/6n1/8/8/8/8/1B6/4K3 w - - bm Bxg7; id "tactics.06 hanging knight on the bishop diagonal";
+k7/8/8/r5n1/8/8/8/3QK3 w - - bm Qd5 Qd8; id "tactics.07 queen forks rook and knight (Qd5) or wins the knight by force after check (Qd8+)";
+r2r2k1/5ppp/8/Q7/8/8/8/4K3 w - - am Qxd8; id "tactics.08 avoid losing the queen to a defended back-rank rook";
