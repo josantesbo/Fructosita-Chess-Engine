@@ -14,7 +14,10 @@
 //!     casilla junto con el cambio, no solo excluir casillas.
 //!   - `pawn_structure`: doblados y aislados.
 //!   - `passed_pawns`: avance, distancia de reyes, conectados, protegidos.
+//!     Validado por match: +40.13 Elo, LOS 97.50 % (ver el propio módulo).
 //!   - `king_safety`: columnas abiertas cerca del rey.
+//!   - `knight_outposts`: caballo en agujero avanzado, con bono extra si
+//!     está defendido por un peón propio.
 //!
 //! Se organiza como un término por archivo (en vez de un único eval.rs
 //! monolítico) a propósito: el plan de evaluación artesanal (HCE) de
@@ -43,6 +46,7 @@
 //! encontramos una vez entre `eval` y `see.rs`).
 
 mod king_safety;
+mod knight_outposts;
 mod material;
 mod mobility;
 mod passed_pawns;
@@ -52,6 +56,7 @@ mod score;
 use crate::board::Board;
 use crate::types::Color;
 use king_safety::king_safety;
+use knight_outposts::knight_outposts;
 pub use material::piece_value;
 use material::{game_phase, material_and_pst, MAX_PHASE};
 use mobility::mobility;
@@ -69,6 +74,7 @@ pub struct Breakdown {
     pub pawn_structure: (Score, Score),
     pub passed_pawns: (Score, Score),
     pub king_safety: (Score, Score),
+    pub knight_outposts: (Score, Score),
     pub phase: i32,
     /// Score final en centipeones, idéntico al que devuelve `evaluate()`
     /// para el mismo tablero (relativo a quien tiene el turno, con tempo).
@@ -93,9 +99,23 @@ fn evaluate_breakdown(board: &Board) -> Breakdown {
         king_safety(board, Color::White),
         king_safety(board, Color::Black),
     );
+    let knight_outposts = (
+        knight_outposts(board, Color::White),
+        knight_outposts(board, Color::Black),
+    );
 
-    let total = (material.0 + mobility.0 + pawn_structure.0 + passed_pawns.0 + king_safety.0)
-        - (material.1 + mobility.1 + pawn_structure.1 + passed_pawns.1 + king_safety.1);
+    let total = (material.0
+        + mobility.0
+        + pawn_structure.0
+        + passed_pawns.0
+        + king_safety.0
+        + knight_outposts.0)
+        - (material.1
+            + mobility.1
+            + pawn_structure.1
+            + passed_pawns.1
+            + king_safety.1
+            + knight_outposts.1);
 
     let phase = game_phase(board);
     let tapered = total.interpolate(phase, MAX_PHASE);
@@ -120,6 +140,7 @@ fn evaluate_breakdown(board: &Board) -> Breakdown {
         pawn_structure,
         passed_pawns,
         king_safety,
+        knight_outposts,
         phase,
         score,
     }
@@ -163,6 +184,12 @@ pub fn trace(board: &Board) -> String {
         "Seguridad del rey",
         b.king_safety.0,
         b.king_safety.1,
+    );
+    row(
+        &mut out,
+        "Outposts de caballo",
+        b.knight_outposts.0,
+        b.knight_outposts.1,
     );
     out.push_str(&format!("Fase de partida: {}/{}\n", b.phase, MAX_PHASE));
     out.push_str(&format!(
