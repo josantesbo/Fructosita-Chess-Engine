@@ -6,8 +6,12 @@
 //! mediojuego/final) por término:
 //!   - `material`: material + tablas posicionales (PST) con "tapered eval"
 //!     (interpola entre valores de medio juego y de final).
-//!   - `mobility`: movilidad segura (nº de casillas atacadas, excluyendo
-//!     las vigiladas por un peón enemigo).
+//!   - `mobility`: movilidad (nº de casillas atacadas). Una versión
+//!     "segura" (excluyendo casillas vigiladas por un peón enemigo) se
+//!     probó y se revirtió: perdió con claridad contra el baseline
+//!     (LOS 99.9% a favor del baseline, ver historial de git) — la teoría
+//!     era razonable, pero probablemente exigía recalibrar el peso por
+//!     casilla junto con el cambio, no solo excluir casillas.
 //!   - `pawn_structure`: doblados y aislados.
 //!   - `passed_pawns`: avance, distancia de reyes, conectados, protegidos.
 //!   - `king_safety`: columnas abiertas cerca del rey.
