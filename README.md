@@ -91,7 +91,7 @@ Current engine status:
 | SEE | ✅ |
 | Magic Bitboards | ✅ |
 | Lazy SMP | ✅ |
-| Automated Tests | **52 / 52 Passed** |
+| Automated Tests | **92 / 92 Passed** |
 | Perft Validation | ✅ |
 
 **Estimated strength:** development estimate only, not yet confirmed by
@@ -149,7 +149,7 @@ Fructosita includes an extensive automated test suite covering:
 Current status:
 
 ```
-84 tests passed
+92 tests passed
 0 failed
 ```
 

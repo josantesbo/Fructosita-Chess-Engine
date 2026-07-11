@@ -86,20 +86,26 @@ pub fn passed_pawns(board: &Board, color: Color) -> Score {
 
     // Primero se identifican TODOS los peones pasados propios: hace falta
     // el conjunto completo antes de poder evaluar "conectados" (¿el de la
-    // columna vecina también es pasado?).
-    let mut passed_squares: Vec<Square> = Vec::new();
+    // columna vecina también es pasado?). Arreglo fijo en el stack, sin
+    // reserva de memoria dinámica: nunca hay más de 8 peones por bando
+    // (no aumentan, solo se pierden o coronan), y esta función se llama
+    // en cada nodo de la búsqueda.
+    let mut passed_squares = [0 as Square; 8];
+    let mut passed_count = 0usize;
     let mut bb = own_pawns;
     while bb != EMPTY {
         let sq = pop_lsb(&mut bb);
         if is_passed(sq, color, enemy_pawns) {
-            passed_squares.push(sq);
+            passed_squares[passed_count] = sq;
+            passed_count += 1;
         }
     }
+    let passed_squares = &passed_squares[..passed_count];
 
     let mut mg = 0;
     let mut eg = 0;
 
-    for &sq in &passed_squares {
+    for &sq in passed_squares {
         let file = file_of(sq);
         let rank = rank_of(sq);
         let advance = if color == Color::White {
