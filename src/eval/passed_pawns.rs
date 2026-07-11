@@ -16,9 +16,18 @@
 //!     protegen mutuamente el avance.
 //!   - Peón pasado protegido por otro peón propio.
 //!
-//! Valores en fase de candidato: estimaciones de partida conservadoras
-//! (no vienen de ningún motor existente), a validar con match antes de
-//! tocarlas — mismo criterio que el resto de términos nuevos del proyecto.
+//! Validado por match (fastchess, 10+0.1, 200 partidas): +40.13 Elo,
+//! LOS 97.50 % a favor de esta versión frente al motor sin este término.
+//! Primera ganancia de Elo confirmada del proyecto tras tres intentos
+//! previos neutros o negativos (pareja de alfiles, torre en columna
+//! abierta, movilidad segura) — a diferencia de esos tres, este término
+//! solo *añade* bonificaciones nuevas en vez de recalibrar el peso de un
+//! término ya existente, lo cual parece ser la diferencia relevante: no
+//! hay una calibración previa que este cambio pueda desequilibrar.
+//!
+//! Los valores concretos (pesos de cada sub-bono) siguen siendo
+//! estimaciones nunca afinadas contra datos reales — candidatos naturales
+//! para el futuro afinador Texel, no números que deban tocarse a mano.
 
 use crate::bitboard::{get_bit, pop_lsb, tables, EMPTY};
 use crate::board::Board;
