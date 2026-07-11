@@ -6,8 +6,10 @@
 //! mediojuego/final) por término:
 //!   - `material`: material + tablas posicionales (PST) con "tapered eval"
 //!     (interpola entre valores de medio juego y de final).
-//!   - `mobility`: movilidad (nº de casillas atacadas).
-//!   - `pawn_structure`: estructura de peones (doblados, aislados, pasados).
+//!   - `mobility`: movilidad segura (nº de casillas atacadas, excluyendo
+//!     las vigiladas por un peón enemigo).
+//!   - `pawn_structure`: doblados y aislados.
+//!   - `passed_pawns`: avance, distancia de reyes, conectados, protegidos.
 //!   - `king_safety`: columnas abiertas cerca del rey.
 //!
 //! Se organiza como un término por archivo (en vez de un único eval.rs
@@ -39,6 +41,7 @@
 mod king_safety;
 mod material;
 mod mobility;
+mod passed_pawns;
 mod pawn_structure;
 mod score;
 
@@ -48,6 +51,7 @@ use king_safety::king_safety;
 pub use material::piece_value;
 use material::{game_phase, material_and_pst, MAX_PHASE};
 use mobility::mobility;
+use passed_pawns::passed_pawns;
 use pawn_structure::pawn_structure;
 pub use score::Score;
 
@@ -59,6 +63,7 @@ pub struct Breakdown {
     pub material: (Score, Score), // (blancas, negras)
     pub mobility: (Score, Score),
     pub pawn_structure: (Score, Score),
+    pub passed_pawns: (Score, Score),
     pub king_safety: (Score, Score),
     pub phase: i32,
     /// Score final en centipeones, idéntico al que devuelve `evaluate()`
@@ -76,13 +81,17 @@ fn evaluate_breakdown(board: &Board) -> Breakdown {
         pawn_structure(board, Color::White),
         pawn_structure(board, Color::Black),
     );
+    let passed_pawns = (
+        passed_pawns(board, Color::White),
+        passed_pawns(board, Color::Black),
+    );
     let king_safety = (
         king_safety(board, Color::White),
         king_safety(board, Color::Black),
     );
 
-    let total = (material.0 + mobility.0 + pawn_structure.0 + king_safety.0)
-        - (material.1 + mobility.1 + pawn_structure.1 + king_safety.1);
+    let total = (material.0 + mobility.0 + pawn_structure.0 + passed_pawns.0 + king_safety.0)
+        - (material.1 + mobility.1 + pawn_structure.1 + passed_pawns.1 + king_safety.1);
 
     let phase = game_phase(board);
     let tapered = total.interpolate(phase, MAX_PHASE);
@@ -105,6 +114,7 @@ fn evaluate_breakdown(board: &Board) -> Breakdown {
         material,
         mobility,
         pawn_structure,
+        passed_pawns,
         king_safety,
         phase,
         score,
@@ -137,6 +147,12 @@ pub fn trace(board: &Board) -> String {
         "Estructura peones",
         b.pawn_structure.0,
         b.pawn_structure.1,
+    );
+    row(
+        &mut out,
+        "Peones pasados",
+        b.passed_pawns.0,
+        b.passed_pawns.1,
     );
     row(
         &mut out,
