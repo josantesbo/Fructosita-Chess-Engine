@@ -200,6 +200,22 @@ impl Tables {
         self.pawn[color.index()][sq as usize]
     }
 
+    /// Todas las casillas atacadas por al menos un peón de `color` presente
+    /// en el bitboard `pawns`. Usado tanto por movilidad segura (excluir
+    /// casillas vigiladas por peones enemigos) como por peones pasados
+    /// (¿está este peón protegido por otro peón propio?) — un solo lugar
+    /// para "conjunto de casillas atacadas por un grupo de peones" en vez
+    /// de que cada término lo recalcule a su manera.
+    pub fn pawn_attack_set(&self, pawns: Bitboard, color: Color) -> Bitboard {
+        let mut attacked = EMPTY;
+        let mut bb = pawns;
+        while bb != EMPTY {
+            let sq = pop_lsb(&mut bb);
+            attacked |= self.pawn_attacks(color, sq);
+        }
+        attacked
+    }
+
     /// Recorta un rayo precalculado en el primer bloqueador. Método de
     /// referencia ("oráculo"): ya no se usa en la ruta rápida del motor (ver
     /// `bishop_attacks`/`rook_attacks`, que usan magic bitboards), pero se

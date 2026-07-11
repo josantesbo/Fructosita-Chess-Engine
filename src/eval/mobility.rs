@@ -10,28 +10,18 @@
 //! precisamente por esto — es uno de los ajustes más básicos y mejor
 //! establecidos sobre la movilidad ingenua ("cuenta todo lo que se ataca").
 
-use crate::bitboard::{count_bits, pop_lsb, tables, Bitboard, EMPTY};
+use crate::bitboard::{count_bits, pop_lsb, tables, EMPTY};
 use crate::board::Board;
 use crate::eval::score::Score;
 use crate::types::*;
-
-/// Todas las casillas atacadas por al menos un peón de `color`.
-fn pawn_attack_set(board: &Board, color: Color) -> Bitboard {
-    let t = tables();
-    let mut attacked = EMPTY;
-    let mut bb = board.pieces[color.index()][PieceType::Pawn.index()];
-    while bb != EMPTY {
-        let sq = pop_lsb(&mut bb);
-        attacked |= t.pawn_attacks(color, sq);
-    }
-    attacked
-}
 
 pub fn mobility(board: &Board, color: Color) -> Score {
     let t = tables();
     let occ = board.occupancy();
     let own = board.color_occupancy(color);
-    let enemy_pawn_attacks = pawn_attack_set(board, color.opposite());
+    let enemy = color.opposite();
+    let enemy_pawns = board.pieces[enemy.index()][PieceType::Pawn.index()];
+    let enemy_pawn_attacks = t.pawn_attack_set(enemy_pawns, enemy);
     let safe = !own & !enemy_pawn_attacks;
     let mut count = 0i32;
 
