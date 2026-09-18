@@ -1,3 +1,7 @@
 /target
 Cargo.lock
 *.pdb
+
+# Secrets / local env (never commit)
+.env
+.env.*
