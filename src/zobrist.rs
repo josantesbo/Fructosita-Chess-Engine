@@ -52,7 +52,12 @@ impl ZobristKeys {
         for k in en_passant_file.iter_mut() {
             *k = rng.next();
         }
-        ZobristKeys { piece_square, side_to_move, castling, en_passant_file }
+        ZobristKeys {
+            piece_square,
+            side_to_move,
+            castling,
+            en_passant_file,
+        }
     }
 
     #[inline(always)]
@@ -74,8 +79,14 @@ mod tests {
     #[test]
     fn keys_are_distinct() {
         let k = keys();
-        assert_ne!(k.piece(Color::White, PieceType::Pawn, 0), k.piece(Color::White, PieceType::Pawn, 1));
-        assert_ne!(k.piece(Color::White, PieceType::Pawn, 0), k.piece(Color::Black, PieceType::Pawn, 0));
+        assert_ne!(
+            k.piece(Color::White, PieceType::Pawn, 0),
+            k.piece(Color::White, PieceType::Pawn, 1)
+        );
+        assert_ne!(
+            k.piece(Color::White, PieceType::Pawn, 0),
+            k.piece(Color::Black, PieceType::Pawn, 0)
+        );
         assert_ne!(k.side_to_move, k.castling[0]);
     }
 }

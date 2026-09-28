@@ -1,3 +1,13 @@
-/target
-Cargo.lock
+/target/
 *.pdb
+*.ilk
+*.obj
+*.log
+*.tmp
+*.bak
+*.swp
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
