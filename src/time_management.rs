@@ -30,6 +30,19 @@ const MOVETIME_MARGIN_MS: u64 = 5;
 const HARD_MULTIPLIER: u64 = 3;
 const INCREMENT_NUMERATOR: u64 = 4;
 const INCREMENT_DENOMINATOR: u64 = 5;
+// TM-01 (reto 24H). Umbral para EMPEZAR una iteración nueva, en % del
+// presupuesto blando de la jugada. `soft_ms` solo se usa en el bucle de
+// profundización iterativa como "no empezar otra iteración"; el plazo duro se
+// sigue calculando sobre el presupuesto completo (3x), así que el tope de
+// tiempo por jugada NO cambia.
+//
+// El valor se DERIVA de una medición, no se ha barrido ni afinado por Elo: en
+// una muestra de 179 jugadas (10+0.1) el 17,8 % del tiempo de reflexión se
+// gastaba en iteraciones abortadas por el plazo duro y descartadas. El cociente
+// de tiempos entre iteraciones consecutivas medido fue mediana 2,32, p75 3,03,
+// p90 4,4. Una iteración empezada antes del 60 % del presupuesto termina antes
+// del plazo duro (3x) si su cociente es <= 5 (0,6 x 5 = 3), lo que cubre el p90.
+const ITERATION_START_PCT: u64 = 60;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimeControlInput {
@@ -118,9 +131,19 @@ fn allocate_clock_time(
         .saturating_mul(HARD_MULTIPLIER)
         .min(usable_ms)
         .max(soft_ms);
+    // TM-01: el plazo blando que se devuelve es el umbral de inicio de
+    // iteración. Nunca 0 si había presupuesto (se completa al menos una
+    // iteración en cualquier caso) y nunca por encima del plazo duro.
+    let iteration_start_ms = if soft_ms == 0 {
+        0
+    } else {
+        (soft_ms * ITERATION_START_PCT / 100)
+            .max(MIN_CLOCK_ALLOCATION_MS)
+            .min(hard_ms)
+    };
 
     TimeAllocation {
-        soft_ms: Some(soft_ms),
+        soft_ms: Some(iteration_start_ms),
         hard_ms: Some(hard_ms),
         reason: TimeAllocationReason::Clock,
     }
@@ -208,7 +231,10 @@ mod tests {
         // CLOCK-E1: valor esperado actualizado por el cambio de reserva.
         // reserva 50  -> usable 59.950 -> 59.950/30 = 1.998 -> 1.998 + 800 = 2.798
         // reserva 250 -> usable 59.750 -> 59.750/30 = 1.991 -> 1.991 + 800 = 2.791
-        assert_eq!(allocation.soft_ms, Some(2_791));
+        // TM-01: el plazo blando devuelto es el 60 % -> 2.791 * 60 / 100 = 1.674;
+        // el duro sigue siendo 3 x 2.791 = 8.373.
+        assert_eq!(allocation.soft_ms, Some(1_674));
+        assert_eq!(allocation.hard_ms, Some(8_373));
         assert!(allocation.hard_ms.unwrap() < 60_000);
         assert_ordered(allocation);
     }
@@ -252,7 +278,9 @@ mod tests {
         // CLOCK-E1: valor esperado actualizado por el cambio de reserva.
         // reserva 50  -> usable 8.950 -> 8.950/9 = 994 -> 994 + 80 = 1.074
         // reserva 250 -> usable 8.750 -> 8.750/9 = 972 -> 972 + 80 = 1.052
-        assert_eq!(allocation.soft_ms, Some(1_052));
+        // TM-01: 1.052 * 60 / 100 = 631; duro 3 x 1.052 = 3.156.
+        assert_eq!(allocation.soft_ms, Some(631));
+        assert_eq!(allocation.hard_ms, Some(3_156));
         assert!(allocation.hard_ms.unwrap() < 9_000);
         assert_ordered(allocation);
     }
@@ -289,6 +317,42 @@ mod tests {
                 no_deadline(TimeAllocationReason::InfiniteOrPonder)
             );
         }
+    }
+
+    #[test]
+    fn tm01_iteration_start_is_fraction_of_budget_and_hard_is_unchanged() {
+        // 10+0.1, 9 s en el reloj: presupuesto = (9.000-250)/30 + 80 = 291 + 80 = 371.
+        let allocation = allocate_time(TimeControlInput {
+            wtime_ms: Some(9_000),
+            winc_ms: Some(100),
+            ..base_input()
+        });
+        assert_eq!(allocation.soft_ms, Some(371 * 60 / 100));
+        assert_eq!(allocation.hard_ms, Some(371 * 3));
+        assert_ordered(allocation);
+    }
+
+    #[test]
+    fn tm01_tiny_budget_keeps_at_least_one_ms_and_stays_ordered() {
+        for wtime in [252, 260, 300, 400] {
+            let allocation = allocate_time(TimeControlInput {
+                wtime_ms: Some(wtime),
+                winc_ms: Some(0),
+                ..base_input()
+            });
+            assert!(allocation.soft_ms.unwrap() >= 1);
+            assert_ordered(allocation);
+        }
+    }
+
+    #[test]
+    fn tm01_movetime_is_not_affected() {
+        let allocation = allocate_time(TimeControlInput {
+            movetime_ms: Some(1000),
+            ..base_input()
+        });
+        assert_eq!(allocation.soft_ms, Some(995));
+        assert_eq!(allocation.hard_ms, Some(1000));
     }
 
     #[test]

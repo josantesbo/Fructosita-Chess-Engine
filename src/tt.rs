@@ -16,6 +16,7 @@
 //! muchísimo menor riesgo de bugs sutiles de concurrencia.
 
 use crate::moves::Move;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Mutex;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,6 +36,8 @@ struct TTEntry {
     score: i32,
     flag: TTFlag,
     best_move: Option<Move>,
+    /// Generación (búsqueda `go`) en la que se escribió la entrada. EXP-0005.
+    generation: u8,
 }
 
 pub struct TTProbe {
@@ -57,6 +60,12 @@ pub struct TranspositionTable {
     shards: Vec<Shard>,
     entries_per_shard: usize,
     total_mask: usize,
+    /// Generación actual: se incrementa al empezar cada búsqueda (`go`).
+    /// EXP-0005 (envejecimiento): una entrada de una búsqueda anterior se puede
+    /// reemplazar aunque sea más profunda. Sin esto, la regla "reemplazar si
+    /// depth <=" deja la tabla llena de entradas profundas de jugadas ya
+    /// pasadas que nunca se sustituyen durante la partida.
+    generation: AtomicU8,
 }
 
 impl TranspositionTable {
@@ -83,7 +92,13 @@ impl TranspositionTable {
             shards,
             entries_per_shard,
             total_mask: actual_total - 1,
+            generation: AtomicU8::new(0),
         }
+    }
+
+    /// Marca el comienzo de una búsqueda nueva (EXP-0005).
+    pub fn new_search(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     #[inline(always)]
@@ -126,10 +141,15 @@ impl TranspositionTable {
     pub fn store(&self, key: u64, depth: i32, score: i32, flag: TTFlag, best_move: Option<Move>) {
         let (shard_idx, local_idx) = self.locate(key);
         let depth = depth.clamp(0, i8::MAX as i32) as i8;
+        let generation = self.generation.load(Ordering::Relaxed);
         let mut entries = self.shards[shard_idx].entries.lock().unwrap();
         let replace = match &entries[local_idx] {
             None => true,
-            Some(existing) => existing.key == key || existing.depth <= depth,
+            Some(existing) => {
+                existing.key == key
+                    || existing.generation != generation
+                    || existing.depth <= depth
+            }
         };
         if replace {
             entries[local_idx] = Some(TTEntry {
@@ -138,6 +158,7 @@ impl TranspositionTable {
                 score,
                 flag,
                 best_move,
+                generation,
             });
         }
     }
@@ -158,6 +179,20 @@ mod tests {
         assert_eq!(probe.depth, 5);
         assert_eq!(probe.score, 100);
         assert_eq!(probe.flag, TTFlag::Exact);
+    }
+
+    #[test]
+    fn stale_deep_entry_is_replaced_after_new_search() {
+        // EXP-0005: misma casilla, entrada profunda de una búsqueda anterior.
+        let tt = TranspositionTable::new(1);
+        let a = 7u64;
+        let b = a + (tt.total_mask as u64 + 1); // colisiona en la misma casilla
+        tt.store(a, 20, 1, TTFlag::Exact, None);
+        tt.store(b, 3, 2, TTFlag::Exact, None);
+        assert!(tt.probe(a).is_some(), "misma generación: la profunda se conserva");
+        tt.new_search();
+        tt.store(b, 3, 2, TTFlag::Exact, None);
+        assert_eq!(tt.probe(b).unwrap().score, 2, "generación nueva: se reemplaza");
     }
 
     #[test]

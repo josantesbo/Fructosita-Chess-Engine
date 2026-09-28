@@ -41,6 +41,35 @@ const CONT_HISTORY_MAX: i16 = 16_384;
 // obtener `tier_change_pct` (puerta 2). Cuesta tiempo → OFF en el candidato.
 const MEASURE_TIER_CHANGES: bool = false;
 
+// ---------------------------------------------------------------------------
+// EXP-0005 (SEARCH-A) — LMR logarítmica.
+// La reducción crece con el producto ln(profundidad)·ln(nº de jugada): reducir
+// más cuanto más tarde aparece la jugada Y cuanto más profundo es el nodo (el
+// coste de buscar de más crece exponencialmente con la profundidad). La forma
+// ln·ln es el concepto público (CPW, "Late Move Reductions"). Los DOS
+// coeficientes son propios, fijados por dos anclas y no afinados:
+//   (a) d=3, jugada 4 -> R=1: exactamente lo que ya hacía Fructosita, para no
+//       cambiar el comportamiento cerca de las hojas;
+//   (b) d=12, jugada 20 -> R=3: una jugada tardía en un nodo profundo se busca
+//       como mucho 3 plies más corta antes de verificarla.
+// Resolviendo R = a + ln d · ln m / c con (a), (b): a ≈ 0,5, c ≈ 3,0.
+// ---------------------------------------------------------------------------
+const LMR_BASE: f64 = 0.5;
+const LMR_DIVISOR: f64 = 3.0;
+
+fn lmr_table() -> &'static [[i32; 64]; 64] {
+    static TABLE: std::sync::OnceLock<[[i32; 64]; 64]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [[0i32; 64]; 64];
+        for (d, row) in t.iter_mut().enumerate().skip(1) {
+            for (m, r) in row.iter_mut().enumerate().skip(1) {
+                *r = (LMR_BASE + (d as f64).ln() * (m as f64).ln() / LMR_DIVISOR) as i32;
+            }
+        }
+        t
+    })
+}
+
 #[derive(Debug, Default)]
 pub struct SearchStats {
     pub nodes: AtomicU64,
@@ -600,14 +629,36 @@ fn negamax(
     // buena que supera beta, es muy probable que la posición real también lo
     // haga, así que podamos esta rama. Se evita en jaque, en profundidades
     // bajas, y sin material mayor propio (riesgo de zugzwang).
-    if !in_check && depth >= 3 && ply > 0 && has_non_pawn_material(board, board.side_to_move) {
+    //
+    // EXP-0005 (SEARCH-A): tres cambios sobre el null move original.
+    //  1. Solo si la eval estática ya alcanza beta: si ni siquiera "estando
+    //     aquí" llegamos a beta, pasar el turno casi nunca corta y el intento es
+    //     trabajo perdido.
+    //  2. Solo en nodos non-PV (ventana nula): en la PV queremos el valor
+    //     exacto, no un corte especulativo.
+    //  3. Reducción adaptativa R = 3 + depth/4 + min((eval-beta)/200, 2): hasta
+    //     depth 7 es la R=3 de siempre; más profundo, y cuanto más sobra sobre
+    //     beta, más barata es la verificación. 200 cp ≈ dos peones de colchón
+    //     por ply extra; tope 2 para no degenerar en quiescencia.
+    // Un score de mate devuelto por la búsqueda nula no es fiable (la posición
+    // tras pasar es ilegal en ajedrez real): se devuelve beta en ese caso.
+    let is_pv = beta - alpha > 1;
+    if !is_pv
+        && !in_check
+        && depth >= 3
+        && ply > 0
+        && static_eval >= beta
+        && beta.abs() < MATE_SCORE - MAX_PLY as i32
+        && has_non_pawn_material(board, board.side_to_move)
+    {
         ctx.stats.null_move_attempts.fetch_add(1, Ordering::Relaxed);
+        let null_r = 3 + depth / 4 + ((static_eval - beta) / 200).min(2);
         let null_board = board.make_null_move();
         ctx.game_history.push(null_board.hash);
         let mut child_pv = Vec::new();
         let score = -negamax(
             &null_board,
-            depth - 4,
+            depth - 1 - null_r,
             -beta,
             -beta + 1,
             ply + 1,
@@ -620,7 +671,7 @@ fn negamax(
         }
         if score >= beta {
             ctx.stats.null_move_cutoffs.fetch_add(1, Ordering::Relaxed);
-            return score;
+            return if score >= MATE_SCORE - MAX_PLY as i32 { beta } else { score };
         }
     }
 
@@ -811,18 +862,32 @@ fn negamax(
         let score = if i == 0 {
             -negamax(&next, iir_depth - 1, -beta, -alpha, ply + 1, &mut child_pv, ctx)
         } else {
+            // EXP-0005 (SEARCH-A): LMR logarítmica (ver `lmr_table`). Se aplica
+            // a silenciosas desde la 3ª jugada en non-PV y desde la 4ª en PV,
+            // nunca si la jugada da jaque. Moduladores de una unidad, cada uno
+            // con su motivo: +1 si la posición no mejora (improving=false:
+            // menos probable que una jugada tardía la salve); −1 en PV (la
+            // línea principal merece precisión); −1 para killers (ya cortaron
+            // en un hermano). Se limita para que el hijo quede con depth >= 1.
+            let lmr_min_index = if is_pv { 3 } else { 2 };
             let reduction = if depth >= 3
-                && i >= 4
-                && !mv.is_capture()
-                && mv.promotion().is_none()
+                && i >= lmr_min_index
+                && is_quiet
                 && !in_check
+                && !next.in_check(next.side_to_move)
             {
                 ctx.stats.lmr_attempts.fetch_add(1, Ordering::Relaxed);
-                if i >= 10 {
-                    2
-                } else {
-                    1
+                let mut r = lmr_table()[(depth as usize).min(63)][i.min(63)];
+                if !improving {
+                    r += 1;
                 }
+                if is_pv {
+                    r -= 1;
+                }
+                if ctx.killers[ply][0] == Some(mv) || ctx.killers[ply][1] == Some(mv) {
+                    r -= 1;
+                }
+                r.clamp(0, (iir_depth - 2).max(0))
             } else {
                 0
             };
@@ -965,7 +1030,7 @@ fn iterative_deepening_one_thread(
 ) -> ThreadResult {
     let root_moves = generate_legal_moves(board);
     let mut best_move = root_moves[0];
-    let mut best_score = 0;
+    let mut best_score: i32 = 0;
     let mut last_completed_depth = 0;
 
     let mut ctx = SearchContext {
@@ -991,7 +1056,42 @@ fn iterative_deepening_one_thread(
             break;
         }
         let mut pv = Vec::new();
-        let score = negamax(board, depth, -INFINITY, INFINITY, 0, &mut pv, &mut ctx);
+        // EXP-0005 (SEARCH-A): aspiration windows. Desde depth 5, la iteración
+        // se busca con una ventana de ±ASP_DELTA alrededor del score anterior:
+        // entre iteraciones consecutivas el score suele moverse poco, y una
+        // ventana estrecha poda más. Si el resultado cae fuera, se ensancha
+        // SOLO el lado que falló y el margen se duplica; por encima de
+        // ASP_MAX_DELTA se pasa a ventana infinita. Nunca con scores de mate.
+        // 25 cp = un cuarto de peón: menor que la oscilación típica entre
+        // iteraciones de una posición tranquila, mayor que el ruido de tempo.
+        const ASP_MIN_DEPTH: i32 = 5;
+        const ASP_DELTA: i32 = 25;
+        const ASP_MAX_DELTA: i32 = 800;
+        let score = if depth >= ASP_MIN_DEPTH && best_score.abs() < MATE_SCORE - MAX_PLY as i32 {
+            let mut delta = ASP_DELTA;
+            let mut alpha = best_score - delta;
+            let mut beta = best_score + delta;
+            loop {
+                let s = negamax(board, depth, alpha, beta, 0, &mut pv, &mut ctx);
+                if ctx.stopped {
+                    break s;
+                }
+                if s <= alpha {
+                    alpha = (s - delta).max(-INFINITY);
+                } else if s >= beta {
+                    beta = (s + delta).min(INFINITY);
+                } else {
+                    break s;
+                }
+                delta *= 2;
+                if delta > ASP_MAX_DELTA {
+                    alpha = -INFINITY;
+                    beta = INFINITY;
+                }
+            }
+        } else {
+            negamax(board, depth, -INFINITY, INFINITY, 0, &mut pv, &mut ctx)
+        };
         let completed = !ctx.stopped;
 
         if completed || depth == 1 {
@@ -1043,6 +1143,7 @@ pub fn lazy_smp_search(
 ) -> (Move, i32) {
     let threads = threads.max(1);
     let stats = Arc::new(SearchStats::default());
+    tt.new_search(); // EXP-0005: envejecimiento de la TT
 
     if threads == 1 {
         let result =
