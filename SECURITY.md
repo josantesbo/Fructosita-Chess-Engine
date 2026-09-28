@@ -2,7 +2,7 @@
 
 ## Supported version
 
-Security fixes are applied to the latest public Fructosita release. Historical tags, including `v1.3.4`, are preserved for reproducibility and may not receive backports.
+Security fixes are applied to the latest public Fructosita release. Historical tags are preserved for reproducibility and may not receive backports.
 
 ## Reporting a vulnerability
 

@@ -1,36 +1,43 @@
-# v1.5.0 publication provenance
+# v1.7.0 publication provenance
 
-This tag preserves the Fructosita 1.5.0 engine implementation prepared from the measured **EXP-0005** candidate while adding publication documentation and correcting canonical repository metadata.
+This tag preserves the Fructosita 1.7.0 engine implementation supplied in the historical release bundle while adding publication documentation and correcting canonical repository metadata.
 
 ## Historical artifacts supplied for publication
 
-- Windows x86_64 binary SHA-256: `9f8f60b2a46165079ee4267fbb06cb5eab378e562f2370a43aec41ebaae69849`
-- Original v1.5.0 source archive supplied by the release-preparation bundle SHA-256: `c34d290bb4b7a5e0043d35d19bbd8ce76d4587cd391b2adb1248e967782c69c5`
+- Outer historical bundle `v1.7.0.zip` SHA-256: `ea5c1b0e922ce860943fd30f6b51d1e81fc91d0c5fb8b78f2e9f16f5cbd6e779`
+- Windows x86_64 binary SHA-256: `6fcddddbd710e80068cbf41975032cf85b33554f2621ec1256474a429295ab07`
+- Original supplied v1.7.0 source archive SHA-256: `c009feefcc00d70e442503c7ecc8fc30fbe62c42c0f0c2756ee03144927eb98e`
 
-## Measured-candidate verification
+The original source archive contains the actual Rust source tree (`src/`), `testdata/`, `Cargo.toml`, `Cargo.lock`, and the GPL license.
 
-The supplied release notes record the EXP-0005 depth-10 deterministic bench as:
+## Chronological scope
 
-- nodes: **735,391**
-- signature: **`b5c623535b1fc8c7`**
+Publication documentation for this tag is intentionally limited to information available up to **Fructosita 1.7.0**. No later Fructosita version, later experiment, or later result is intentionally referenced.
+
+A review of the supplied 1.7.0 source found no explicit references to later numbered Fructosita versions. Historical technical comments in the source were therefore preserved rather than rewritten merely for style.
 
 ## Publication-only changes
 
-The engine implementation under `src/`, `Cargo.lock`, `testdata/`, and the GPL license text are preserved from the supplied v1.5.0 source archive.
+The engine implementation under `src/`, `Cargo.lock`, `testdata/`, and the GPL license text are preserved from the supplied v1.7.0 source archive.
 
 For publication in the canonical repository:
 
 - `Cargo.toml` repository metadata was changed from `jordiqui/Fructosita-Chess-Engine` to `josantesbo/Fructosita-Chess-Engine`;
 - README, changelog, security, contribution, provenance, and ignore files were added or updated;
-- the project logo was added under `assets/`.
+- the existing project artwork under `assets/` is intended to be preserved from the canonical repository during the controlled copy step.
 
 No engine logic was intentionally changed by these publication edits.
 
 ## Strength-note provenance
 
-The parent-relative SPRT figures published for this version are:
+The supplied historical `RELEASE_NOTES.md` reports:
 
 - 1.4.0 vs parent: **+32.8 ± 23.4 Elo**;
-- 1.5.0 vs parent: **+52.2 ± 32.6 Elo**.
+- 1.5.0 vs parent: **+52.2 ± 32.6 Elo**;
+- 1.6.0 vs parent: **+25.6 ± 19.5 Elo**;
+- 1.7.0 vs parent: **+81.9 ± 36.8 Elo**;
+- 1.7.0 vs the 1.3.4 code line: **+146.3 Elo**, reported 95% CI **+131.0 to +162.1**, across **1,400 fresh self-play games**.
 
-Any approximate absolute Elo figure derived from the user's informal 2500-Elo reference for 1.3.4 is explicitly labeled as an estimate and is not a CCRL rating or direct 1.5.0-vs-1.3.4 measurement.
+The supplied publication bundle does not contain the original match log or PGN for the 1,400-game comparison. Accordingly, the direct-match figure is described as a historically reported result and not as an independently re-audited result.
+
+Any absolute Elo estimate derived from the informal ~2500-Elo reference associated with 1.3.4 is explicitly labeled as a development estimate and not a CCRL rating.

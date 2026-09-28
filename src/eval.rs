@@ -443,34 +443,124 @@ fn material_and_pst_components(
     ((material_mg, material_eg), (pst_mg, pst_eg))
 }
 
+#[allow(dead_code)]
 fn mobility(board: &Board, color: Color, params: &EvalParams) -> (i32, i32) {
+    let (mg, eg, _) = mobility_and_king_attack(board, color, params);
+    (mg, eg)
+}
+
+// ---------------------------------------------------------------------------
+// EVAL-A — ataque al rey, pareja de alfiles y torres en columnas (diseño propio).
+//
+// ATAQUE AL REY. La "seguridad del rey" histórica solo mira columnas sin peones
+// propios junto al rey; no ve las piezas enemigas que apuntan a él. Aquí, para
+// el bando `color` que ATACA, se cuentan las casillas de la ZONA del rey rival
+// (rey + casillas adyacentes + la fila siguiente hacia el atacante) que ataca
+// cada pieza. Cada casilla vale unas "unidades" según la pieza, proporcionales
+// a su capacidad de rematar (caballo/alfil 2, torre 3, dama 5 ≈ valor relativo
+// de las piezas redondeado a enteros pequeños). Con UNA sola pieza no hay
+// ataque real (se defiende fácil): solo cuenta con >= 2 atacantes. La
+// penalización crece de forma CUADRÁTICA con las unidades porque el peligro de
+// un ataque coordinado es superlineal (cada atacante extra multiplica las
+// líneas de mate). Sin dama atacante se divide por 2 (sin la dama casi ningún
+// ataque de medio juego prospera). Tope de 400 cp (≈ 5,7 peones a la escala
+// pawn=70 del motor) para que ningún término domine al material. Solo medio
+// juego (el taper lo desvanece hacia el final, donde el rey debe salir).
+// Coeficientes elegidos por razonamiento, NO afinados ni copiados: 3 atacantes
+// sobre 2 casillas cada uno (N+R+Q) = 20 unidades -> 20²/5 = 80 cp.
+// ---------------------------------------------------------------------------
+const KA_UNITS: [i32; 6] = [0, 2, 2, 3, 5, 0]; // pawn, knight, bishop, rook, queen, king
+const KA_DIVISOR: i32 = 5;
+const KA_CAP: i32 = 400;
+const BISHOP_PAIR_MG: i32 = 20;
+const BISHOP_PAIR_EG: i32 = 40;
+const ROOK_OPEN_MG: i32 = 20;
+const ROOK_OPEN_EG: i32 = 8;
+const ROOK_SEMI_MG: i32 = 10;
+const ROOK_SEMI_EG: i32 = 4;
+
+fn king_zone(king_sq: Square, king_color: Color) -> u64 {
+    let t = tables();
+    let near = t.king_attacks(king_sq) | (1u64 << king_sq);
+    // Una fila más hacia el bando atacante (delante del rey defensor).
+    let ahead = match king_color {
+        Color::White => near << 8,
+        Color::Black => near >> 8,
+    };
+    near | ahead
+}
+
+/// Movilidad (idéntica a la histórica) y, en el mismo recorrido, el ataque de
+/// `color` sobre la zona del rey rival. Devuelve (mob_mg, mob_eg, ataque_mg).
+fn mobility_and_king_attack(board: &Board, color: Color, params: &EvalParams) -> (i32, i32, i32) {
     let t = tables();
     let occ = board.occupancy();
     let own = board.color_occupancy(color);
+    let enemy = color.opposite();
+    let zone = king_zone(board.king_square(enemy), enemy);
     let mut count = 0i32;
+    let mut units = 0i32;
+    let mut attackers = 0i32;
 
-    let mut bb = board.pieces[color.index()][PieceType::Knight.index()];
-    while bb != EMPTY {
-        let sq = pop_lsb(&mut bb);
-        count += count_bits(t.knight_attacks(sq) & !own) as i32;
-    }
-    let mut bb = board.pieces[color.index()][PieceType::Bishop.index()];
-    while bb != EMPTY {
-        let sq = pop_lsb(&mut bb);
-        count += count_bits(t.bishop_attacks(sq, occ) & !own) as i32;
-    }
-    let mut bb = board.pieces[color.index()][PieceType::Rook.index()];
-    while bb != EMPTY {
-        let sq = pop_lsb(&mut bb);
-        count += count_bits(t.rook_attacks(sq, occ) & !own) as i32;
-    }
-    let mut bb = board.pieces[color.index()][PieceType::Queen.index()];
-    while bb != EMPTY {
-        let sq = pop_lsb(&mut bb);
-        count += count_bits(t.queen_attacks(sq, occ) & !own) as i32;
+    for pt in [PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
+        let mut bb = board.pieces[color.index()][pt.index()];
+        while bb != EMPTY {
+            let sq = pop_lsb(&mut bb);
+            let att = match pt {
+                PieceType::Knight => t.knight_attacks(sq),
+                PieceType::Bishop => t.bishop_attacks(sq, occ),
+                PieceType::Rook => t.rook_attacks(sq, occ),
+                _ => t.queen_attacks(sq, occ),
+            };
+            count += count_bits(att & !own) as i32;
+            let hits = count_bits(att & zone) as i32;
+            if hits > 0 {
+                attackers += 1;
+                units += KA_UNITS[pt.index()] * hits;
+            }
+        }
     }
 
-    (count * params.mobility_mg, count * params.mobility_eg)
+    let mut attack = 0;
+    if attackers >= 2 {
+        attack = (units * units / KA_DIVISOR).min(KA_CAP);
+        if board.pieces[color.index()][PieceType::Queen.index()] == EMPTY {
+            attack /= 2;
+        }
+    }
+    (count * params.mobility_mg, count * params.mobility_eg, attack)
+}
+
+/// Pareja de alfiles y torres en columnas abiertas/semiabiertas de `color`.
+/// PAREJA: dos alfiles cubren ambos colores de casilla; su ventaja crece al
+/// abrirse la posición, de ahí más peso en el final (20/40 ≈ 0,3/0,6 peones).
+/// TORRES: una torre sin peones propios delante tiene la columna para entrar;
+/// abierta del todo (sin peones) vale el doble que semiabierta. Más en medio
+/// juego (presión sobre el enroque / 7ª) que en el final.
+fn piece_extras(board: &Board, color: Color) -> (i32, i32) {
+    let mut mg = 0;
+    let mut eg = 0;
+    if count_bits(board.pieces[color.index()][PieceType::Bishop.index()]) >= 2 {
+        mg += BISHOP_PAIR_MG;
+        eg += BISHOP_PAIR_EG;
+    }
+    let own_pawns = board.pieces[color.index()][PieceType::Pawn.index()];
+    let enemy_pawns = board.pieces[color.opposite().index()][PieceType::Pawn.index()];
+    let mut rooks = board.pieces[color.index()][PieceType::Rook.index()];
+    while rooks != EMPTY {
+        let sq = pop_lsb(&mut rooks);
+        let file_mask: u64 = FILE_A << file_of(sq);
+        if own_pawns & file_mask == EMPTY {
+            if enemy_pawns & file_mask == EMPTY {
+                mg += ROOK_OPEN_MG;
+                eg += ROOK_OPEN_EG;
+            } else {
+                mg += ROOK_SEMI_MG;
+                eg += ROOK_SEMI_EG;
+            }
+        }
+    }
+    (mg, eg)
 }
 
 #[allow(dead_code)]
@@ -796,8 +886,10 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
     let (b_material, b_pst) = material_and_pst_components(board, Color::Black, params);
     let (w_mg, w_eg) = (w_material.0 + w_pst.0, w_material.1 + w_pst.1);
     let (b_mg, b_eg) = (b_material.0 + b_pst.0, b_material.1 + b_pst.1);
-    let (wm_mg, wm_eg) = mobility(board, Color::White, params);
-    let (bm_mg, bm_eg) = mobility(board, Color::Black, params);
+    let (wm_mg, wm_eg, w_attack) = mobility_and_king_attack(board, Color::White, params);
+    let (bm_mg, bm_eg, b_attack) = mobility_and_king_attack(board, Color::Black, params);
+    let (wx_mg, wx_eg) = piece_extras(board, Color::White);
+    let (bx_mg, bx_eg) = piece_extras(board, Color::Black);
     let (w_pawns, w_passed) = pawn_structure_components(board, Color::White, params);
     let (b_pawns, b_passed) = pawn_structure_components(board, Color::Black, params);
     let (wp_mg, wp_eg) = (w_pawns.0 + w_passed.0, w_pawns.1 + w_passed.1);
@@ -805,8 +897,11 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
     let wk = king_safety(board, Color::White, params);
     let bk = king_safety(board, Color::Black, params);
 
-    let mg = (w_mg + wm_mg + wp_mg + wk) - (b_mg + bm_mg + bp_mg + bk);
-    let eg = (w_eg + wm_eg + wp_eg) - (b_eg + bm_eg + bp_eg);
+    // EVAL-A: el ataque de un bando cuenta como seguridad NEGATIVA del rival
+    // (mismo signo que king_safety), y las piezas extra suman a su bando.
+    let mg = (w_mg + wm_mg + wp_mg + wk + w_attack + wx_mg)
+        - (b_mg + bm_mg + bp_mg + bk + b_attack + bx_mg);
+    let eg = (w_eg + wm_eg + wp_eg + wx_eg) - (b_eg + bm_eg + bp_eg + bx_eg);
 
     let phase = game_phase(board);
     let score = taper(mg, eg, phase);
@@ -837,8 +932,11 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
             board,
             taper(w_passed.0 - b_passed.0, w_passed.1 - b_passed.1, phase),
         ),
-        mobility: relative_to_move(board, taper(wm_mg - bm_mg, wm_eg - bm_eg, phase)),
-        king_safety: relative_to_move(board, wk - bk),
+        mobility: relative_to_move(
+            board,
+            taper(wm_mg + wx_mg - bm_mg - bx_mg, wm_eg + wx_eg - bm_eg - bx_eg, phase),
+        ),
+        king_safety: relative_to_move(board, (wk + w_attack) - (bk + b_attack)),
         tempo: params.tempo,
         total: relative + params.tempo,
     }

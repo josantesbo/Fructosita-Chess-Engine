@@ -212,6 +212,16 @@ impl<'a> SearchContext<'a> {
         }
     }
 
+    /// SEARCH-B: castigo simétrico al bonus. Una silenciosa que se buscó ANTES
+    /// de la que cortó y no cortó recibe −depth²: el historial pasa a medir
+    /// "corta frente a no corta" y no solo "cuántas veces cortó", así que las
+    /// jugadas que fallan de forma repetida bajan en la ordenación (y la LMR las
+    /// reduce antes). Suelo en −1.000.000, simétrico al techo del bonus.
+    fn malus_history(&mut self, color: Color, mv: Move, depth: i32) {
+        let entry = &mut self.history_heuristic[color.index()][mv.from as usize][mv.to as usize];
+        *entry = (*entry - depth * depth).max(-1_000_000);
+    }
+
     /// Incrementa el historial de continuación para (jugada previa → jugada
     /// actual). Misma regla y mismo tope que el history mariposa, para que ambos
     /// vivan en el mismo rango.
@@ -425,6 +435,22 @@ fn quiescence(
         ctx.seldepth = ply as u8;
     }
 
+    // SEARCH-B: consulta de la TT en quiescencia. Cualquier entrada guardada
+    // por la búsqueda principal (profundidad >= 0 >= la de quiescencia) con una
+    // cota utilizable resuelve el nodo sin generar ni ordenar capturas. La
+    // quiescencia no escribe en la TT (no se añade presión sobre la tabla).
+    if let Some(entry) = ctx.tt.probe(board.hash) {
+        let score = score_from_tt(entry.score, ply);
+        let usable = match entry.flag {
+            TTFlag::Exact => true,
+            TTFlag::LowerBound => score >= beta,
+            TTFlag::UpperBound => score <= alpha,
+        };
+        if usable {
+            return score;
+        }
+    }
+
     let in_check = board.in_check(board.side_to_move);
     let stand_pat = if !in_check || ply >= MAX_PLY {
         eval::evaluate(board)
@@ -592,7 +618,24 @@ fn negamax(
     // Evaluación estática del nodo. Hasta ahora solo se calculaba en la
     // quiescencia; RFP, el gating del null-move (a futuro) y la heurística
     // "improving" la necesitan aquí. Ver research/01 y research/02.
-    let static_eval = eval::evaluate(board);
+    // SEARCH-B: la eval estática se afina con la cota de la TT cuando esta dice
+    // más que la heurística: una cota inferior por encima de la eval, una
+    // superior por debajo, o un valor exacto, son información de búsqueda real
+    // sobre ESTE nodo. Así RFP, null move y futility deciden con mejor
+    // estimación. Nunca con scores de mate.
+    let raw_eval = eval::evaluate(board);
+    let static_eval = match &tt_probe {
+        Some(e) if e.score.abs() < MATE_SCORE - MAX_PLY as i32 => {
+            let tts = e.score;
+            match e.flag {
+                TTFlag::Exact => tts,
+                TTFlag::LowerBound if tts > raw_eval => tts,
+                TTFlag::UpperBound if tts < raw_eval => tts,
+                _ => raw_eval,
+            }
+        }
+        _ => raw_eval,
+    };
     ctx.eval_stack[ply] = static_eval;
 
     // Heurística "improving": ¿la eval estática del bando al turno es mejor
@@ -797,10 +840,32 @@ fn negamax(
 
     // Nº de jugadas silenciosas ya buscadas en este nodo (para el umbral LMP).
     let mut quiets_searched: i32 = 0;
+    // SEARCH-B: silenciosas realmente buscadas en este nodo (para el malus).
+    let mut quiets_tried: Vec<Move> = Vec::new();
 
     for (i, &mv) in moves.iter().enumerate() {
         let next = board.make_move(mv);
         let is_quiet = !mv.is_capture() && mv.promotion().is_none();
+
+        // SEARCH-B: poda SEE de capturas perdedoras cerca de las hojas. En
+        // non-PV, sin jaque, depth <= 4, una captura que pierde más de un peón
+        // (100 en unidades SEE) POR ply restante no se busca: con tan pocos
+        // plies no hay tiempo de recuperar ese material. Nunca la primera
+        // jugada, nunca promociones, nunca si da jaque ni con alpha de mate.
+        const SEE_PRUNE_MAX_DEPTH: i32 = 4;
+        const SEE_PRUNE_MARGIN: i32 = 100;
+        if i > 0
+            && beta - alpha == 1
+            && !in_check
+            && depth <= SEE_PRUNE_MAX_DEPTH
+            && mv.is_capture()
+            && mv.promotion().is_none()
+            && alpha > -MATE_SCORE + MAX_PLY as i32
+            && !next.in_check(next.side_to_move)
+            && crate::see::see(board, &mv) < -SEE_PRUNE_MARGIN * depth
+        {
+            continue;
+        }
 
         // Guarda de futility, por jugada (alpha puede haber subido en el bucle).
         // `!next.in_check(...)` (no da jaque) va al final por su coste.
@@ -851,6 +916,7 @@ fn negamax(
 
         if is_quiet {
             quiets_searched += 1;
+            quiets_tried.push(mv);
         }
 
         if let Some(p) = board.mailbox[mv.from as usize] {
@@ -945,6 +1011,11 @@ fn negamax(
             if !mv.is_capture() {
                 ctx.store_killer(ply, mv);
                 ctx.bump_history(board.side_to_move, mv, depth);
+                for &q in quiets_tried.iter() {
+                    if q != mv {
+                        ctx.malus_history(board.side_to_move, q, depth);
+                    }
+                }
                 if let Some(p) = board.mailbox[mv.from as usize] {
                     ctx.bump_cont_history(ply, p.kind, mv.to, depth);
                 }
