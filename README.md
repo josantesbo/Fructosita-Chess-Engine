@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.3.4-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-1.5.0-orange" alt="version">
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
   <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
@@ -23,9 +23,7 @@
 
 **Fructosita** is an original UCI chess engine written from scratch in **Rust**.
 
-Version **1.3.4** is the version submitted to the **CCRL** rating lists. Internally, this engine was developed as version 1.3.3; version 1.3.4 is the public CCRL release identity of the same engine implementation.
-
-Fructosita uses a fully **handcrafted evaluation (HCE)** and a classical alpha-beta search architecture.
+Version **1.5.0** is a search-focused milestone built on the CCRL-era 1.3.4 line. It keeps Fructosita as a fully **handcrafted-evaluation (HCE)** engine while substantially modernizing search behavior and time usage.
 
 The project follows a simple principle:
 
@@ -39,14 +37,51 @@ Fructosita is developed by **Antonio Espinosa**, a *Químico Farmacobiólogo* (c
 
 The project began on July 2, 2026 as a personal challenge to learn from scratch how a chess engine works. The name **Fructosita** comes from the author's undergraduate thesis work involving fructose.
 
-## Fructosita 1.3.4
+## Fructosita 1.5.0
+
+### What's new since 1.3.4
+
+The 1.5.0 line introduces two accepted development steps:
+
+- **Time-management iteration guard**: the engine avoids starting a new iteration once more than 60% of the soft time budget has been consumed.
+- **Logarithmic late-move reductions (LMR)**.
+- **Adaptive null-move pruning**, conditioned on static evaluation and adjusted by depth.
+- **Aspiration windows** around the previous iteration score.
+- **Transposition-table aging**.
+
+These changes form the modernized search core used by this release.
+
+## Strength evidence
+
+The public CCRL-era **1.3.4** release is being used here as an informal reference of approximately **2500 Elo**.
+
+Development SPRTs for the steps leading to 1.5.0 reported:
+
+| Step | Change | SPRT vs parent |
+|---|---|---:|
+| 1.4.0 | Time-management iteration guard | **+32.8 ± 23.4 Elo** |
+| 1.5.0 | Logarithmic LMR, adaptive null move, aspiration windows, TT aging | **+52.2 ± 32.6 Elo** |
+
+If those parent-relative figures are chained arithmetically onto the informal 2500 reference, they suggest a rough development ballpark near **2585 Elo**. **This is not a CCRL rating and not a direct 1.5.0-vs-1.3.4 measurement.** Sequential SPRT estimates are noisy and should not be treated as perfectly additive; the table is included as development evidence, not as a formal absolute rating.
+
+## Verification
+
+The release-preparation source was derived from the measured **EXP-0005** candidate. The deterministic depth-10 bench for the measured candidate was:
+
+- nodes: **735,391**
+- signature: **`b5c623535b1fc8c7`**
+
+Publication-only documentation and canonical repository metadata do not intentionally change engine logic.
 
 ### Search
 
+Fructosita 1.5.0 includes:
+
 - Principal Variation Search
 - Iterative deepening
-- Null-move pruning
-- Late-move reductions
+- Aspiration windows
+- Adaptive null-move pruning
+- Logarithmic late-move reductions
 - Reverse futility pruning
 - Futility pruning
 - Late-move pruning
@@ -56,10 +91,11 @@ The project began on July 2, 2026 as a personal challenge to learn from scratch 
 - Killer heuristic
 - History heuristic
 - One-ply continuation history
+- Transposition-table aging
 
 ### Evaluation
 
-Fructosita 1.3.4 uses a handcrafted, tapered evaluation including:
+Fructosita 1.5.0 retains a handcrafted, tapered evaluation including:
 
 - Material
 - Piece-square tables
@@ -68,8 +104,6 @@ Fructosita 1.3.4 uses a handcrafted, tapered evaluation including:
 - Pawn structure
 - Passed pawns
 - Basic king safety
-
-Evaluation parameters were tuned specifically for Fructosita.
 
 ### Engine
 
@@ -118,8 +152,6 @@ The executable will be generated in `target/release/`.
 ## Release integrity
 
 Official release assets include a `SHA256SUMS.txt` file. Verify downloaded binaries before use when integrity matters.
-
-The historical v1.3.4 Windows binary is distributed as a release asset; the repository tag contains the corresponding engine source plus publication documentation and metadata.
 
 ## Security
 
