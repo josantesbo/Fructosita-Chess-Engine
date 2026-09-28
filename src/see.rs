@@ -49,8 +49,10 @@ fn attackers_to(board: &Board, sq: Square, occ: Bitboard) -> Bitboard {
     // ataque de un peón NEGRO imaginario parado en `sq` (apunta "hacia
     // atrás", justo a las casillas de origen de peones blancos atacantes),
     // y viceversa para peones negros.
-    attackers |= t.pawn_attacks(Color::Black, sq) & board.pieces[Color::White.index()][PieceType::Pawn.index()];
-    attackers |= t.pawn_attacks(Color::White, sq) & board.pieces[Color::Black.index()][PieceType::Pawn.index()];
+    attackers |= t.pawn_attacks(Color::Black, sq)
+        & board.pieces[Color::White.index()][PieceType::Pawn.index()];
+    attackers |= t.pawn_attacks(Color::White, sq)
+        & board.pieces[Color::Black.index()][PieceType::Pawn.index()];
 
     let knights = board.pieces[Color::White.index()][PieceType::Knight.index()]
         | board.pieces[Color::Black.index()][PieceType::Knight.index()];
@@ -75,7 +77,11 @@ fn attackers_to(board: &Board, sq: Square, occ: Bitboard) -> Bitboard {
     attackers & occ
 }
 
-fn least_valuable_attacker(board: &Board, attackers: Bitboard, side: Color) -> Option<(Square, PieceType)> {
+fn least_valuable_attacker(
+    board: &Board,
+    attackers: Bitboard,
+    side: Color,
+) -> Option<(Square, PieceType)> {
     for &pt in &[
         PieceType::Pawn,
         PieceType::Knight,
@@ -107,11 +113,17 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
 
     // Valor de lo que captura `mv` en sí (paso 0 del intercambio).
     let step0_victim_value = if mv.kind == MoveKind::EnPassantCapture {
-        let captured_sq = if board.side_to_move == Color::White { mv.to - 8 } else { mv.to + 8 };
+        let captured_sq = if board.side_to_move == Color::White {
+            mv.to - 8
+        } else {
+            mv.to + 8
+        };
         occ = clear_bit(occ, captured_sq); // el peón capturado al paso no está en `to`
         see_piece_value(PieceType::Pawn)
     } else {
-        let victim_kind = board.mailbox[to as usize].map(|p| p.kind).unwrap_or(PieceType::Pawn);
+        let victim_kind = board.mailbox[to as usize]
+            .map(|p| p.kind)
+            .unwrap_or(PieceType::Pawn);
         see_piece_value(victim_kind)
     };
 
@@ -126,7 +138,9 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
     let mut standing_value = if let Some(promo) = mv.promotion() {
         see_piece_value(promo)
     } else {
-        let original_kind = board.mailbox[mv.from as usize].map(|p| p.kind).unwrap_or(PieceType::Pawn);
+        let original_kind = board.mailbox[mv.from as usize]
+            .map(|p| p.kind)
+            .unwrap_or(PieceType::Pawn);
         see_piece_value(original_kind)
     };
     occ = clear_bit(occ, mv.from);
@@ -149,11 +163,12 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
         // Si un peón recaptura y llega a la última fila, asumimos que
         // promociona a dama (igual que hace nuestro propio movegen): su
         // valor "de pie" tras esta recaptura es el de una dama, no un peón.
-        standing_value = if pt == PieceType::Pawn && (to_rank == promo_rank_0 || to_rank == promo_rank_7) {
-            see_piece_value(PieceType::Queen)
-        } else {
-            see_piece_value(pt)
-        };
+        standing_value =
+            if pt == PieceType::Pawn && (to_rank == promo_rank_0 || to_rank == promo_rank_7) {
+                see_piece_value(PieceType::Queen)
+            } else {
+                see_piece_value(pt)
+            };
 
         occ = clear_bit(occ, sq);
         side = side.opposite();

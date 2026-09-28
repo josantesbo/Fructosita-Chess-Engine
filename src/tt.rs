@@ -74,16 +74,25 @@ impl TranspositionTable {
         let actual_total = entries_per_shard * num_shards;
 
         let shards = (0..num_shards)
-            .map(|_| Shard { entries: Mutex::new(vec![None; entries_per_shard]) })
+            .map(|_| Shard {
+                entries: Mutex::new(vec![None; entries_per_shard]),
+            })
             .collect();
 
-        TranspositionTable { shards, entries_per_shard, total_mask: actual_total - 1 }
+        TranspositionTable {
+            shards,
+            entries_per_shard,
+            total_mask: actual_total - 1,
+        }
     }
 
     #[inline(always)]
     fn locate(&self, key: u64) -> (usize, usize) {
         let global = (key as usize) & self.total_mask;
-        (global / self.entries_per_shard, global % self.entries_per_shard)
+        (
+            global / self.entries_per_shard,
+            global % self.entries_per_shard,
+        )
     }
 
     /// Vacía todas las entradas. Seguro de llamar con la tabla compartida
@@ -123,7 +132,13 @@ impl TranspositionTable {
             Some(existing) => existing.key == key || existing.depth <= depth,
         };
         if replace {
-            entries[local_idx] = Some(TTEntry { key, depth, score, flag, best_move });
+            entries[local_idx] = Some(TTEntry {
+                key,
+                depth,
+                score,
+                flag,
+                best_move,
+            });
         }
     }
 }

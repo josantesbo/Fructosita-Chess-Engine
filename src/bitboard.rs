@@ -124,12 +124,24 @@ impl Tables {
         let mut ray_sw = [EMPTY; 64];
 
         const KNIGHT_OFFSETS: [(i32, i32); 8] = [
-            (1, 2), (2, 1), (2, -1), (1, -2),
-            (-1, -2), (-2, -1), (-2, 1), (-1, 2),
+            (1, 2),
+            (2, 1),
+            (2, -1),
+            (1, -2),
+            (-1, -2),
+            (-2, -1),
+            (-2, 1),
+            (-1, 2),
         ];
         const KING_OFFSETS: [(i32, i32); 8] = [
-            (1, 0), (1, 1), (0, 1), (-1, 1),
-            (-1, 0), (-1, -1), (0, -1), (1, -1),
+            (1, 0),
+            (1, 1),
+            (0, 1),
+            (-1, 1),
+            (-1, 0),
+            (-1, -1),
+            (0, -1),
+            (1, -1),
         ];
 
         for sq in 0u8..64 {
@@ -149,9 +161,17 @@ impl Tables {
         }
 
         Tables {
-            knight, king, pawn,
-            ray_n, ray_s, ray_e, ray_w,
-            ray_ne, ray_nw, ray_se, ray_sw,
+            knight,
+            king,
+            pawn,
+            ray_n,
+            ray_s,
+            ray_e,
+            ray_w,
+            ray_ne,
+            ray_nw,
+            ray_se,
+            ray_sw,
         }
     }
 

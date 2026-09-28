@@ -39,7 +39,10 @@ impl Move {
     #[allow(dead_code)]
     #[inline]
     pub fn is_castle(&self) -> bool {
-        matches!(self.kind, MoveKind::CastleKingside | MoveKind::CastleQueenside)
+        matches!(
+            self.kind,
+            MoveKind::CastleKingside | MoveKind::CastleQueenside
+        )
     }
 
     #[inline]

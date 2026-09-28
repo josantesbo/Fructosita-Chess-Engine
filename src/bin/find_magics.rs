@@ -138,7 +138,11 @@ impl XorShift64 {
 }
 
 fn find_magic(sq: Square, is_rook: bool, rng: &mut XorShift64) -> (u64, u32) {
-    let mask = if is_rook { rook_mask(sq) } else { bishop_mask(sq) };
+    let mask = if is_rook {
+        rook_mask(sq)
+    } else {
+        bishop_mask(sq)
+    };
     let bits = mask.count_ones();
     let shift = 64 - bits;
     let size = 1usize << bits;

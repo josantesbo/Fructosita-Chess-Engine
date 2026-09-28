@@ -31,7 +31,11 @@ pub fn perft_divide(board: &Board, depth: u32) -> Vec<(String, u64)> {
         .into_iter()
         .map(|mv| {
             let next = board.make_move(mv);
-            let count = if depth == 0 { 1 } else { perft(&next, depth - 1) };
+            let count = if depth == 0 {
+                1
+            } else {
+                perft(&next, depth - 1)
+            };
             (mv.to_string(), count)
         })
         .collect()
@@ -57,10 +61,9 @@ mod tests {
     fn perft_kiwipete() {
         // Posición "Kiwipete" de Peter McKenzie: diseñada específicamente
         // para atrapar bugs de enroque, captura al paso y promociones.
-        let b = Board::from_fen(
-            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-        )
-        .unwrap();
+        let b =
+            Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+                .unwrap();
         assert_eq!(perft(&b, 1), 48);
         assert_eq!(perft(&b, 2), 2039);
         assert_eq!(perft(&b, 3), 97862);
