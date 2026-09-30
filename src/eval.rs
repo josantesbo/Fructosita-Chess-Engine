@@ -21,68 +21,130 @@ use std::sync::OnceLock;
 
 const FILE_A: u64 = 0x0101010101010101;
 
-/// Pesos escalares afinables de la evaluación (fase P1C, método Texel).
+/// Pesos escalares afinables de la evaluación (método Texel).
 ///
-/// `Default` reproduce EXACTAMENTE los valores históricos del motor: si
-/// nadie inyecta otros pesos, el juego es bit-idéntico al de siempre (lo
-/// garantiza la firma de bench y la herramienta de equivalencia). El
-/// afinador (`texel-tune`) construye variantes de esta struct y evalúa el
-/// dataset con `evaluate_with` para buscar pesos con menor error.
-///
-/// Deliberadamente NO incluye (todavía) los coeficientes de las fórmulas
-/// PST: esos son flotantes dentro de `build_pst` y se afinarán en una
-/// pasada posterior, con más cuidado, porque interactúan con el material.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvalParams {
-    pub pawn: i32,
-    pub knight: i32,
-    pub bishop: i32,
-    pub rook: i32,
-    pub queen: i32,
-    pub mobility_mg: i32,
-    pub mobility_eg: i32,
-    pub doubled_mg: i32,
-    pub doubled_eg: i32,
-    pub isolated_mg: i32,
-    pub isolated_eg: i32,
-    pub passed_base: i32,
-    pub passed_advancement: i32,
-    pub passed_protected: i32,
-    pub passed_connected: i32,
-    pub passed_king_race: i32,
-    pub king_open_file: i32,
-    pub tempo: i32,
+/// EXP-0015 (EVAL-D): la lista se define con una macro para que struct,
+/// `Default`, nombres y conversión a vector (la usa el afinador) salgan de la
+/// MISMA lista y no puedan desincronizarse. Los valores por defecto son los
+/// afinados en EXP-0015 (ver EXPERIMENT_LEDGER); los términos que ya existían
+/// parten de los históricos.
+macro_rules! eval_params {
+    ($($name:ident = $val:expr),* $(,)?) => {
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub struct EvalParams {
+            $(pub $name: i32,)*
+            /// EVAL-F: corrección de PST por columna y fila:
+            /// [fase (mg, eg)][pieza][0..8 columna, 8..16 fila relativa].
+            pub pst_fr: [[[i32; 16]; 6]; 2],
+        }
+        impl Default for EvalParams {
+            fn default() -> Self {
+                EvalParams { $($name: $val,)* pst_fr: PST_FR_DEFAULT }
+            }
+        }
+        pub const PARAM_NAMES: &[&str] = &[$(stringify!($name),)*];
+        impl EvalParams {
+            /// Número de escalares (los que no pueden ser negativos en el afinado).
+            pub fn scalar_count() -> usize {
+                PARAM_NAMES.len()
+            }
+            pub fn param_name(i: usize) -> String {
+                if i < PARAM_NAMES.len() {
+                    PARAM_NAMES[i].to_string()
+                } else {
+                    let j = i - PARAM_NAMES.len();
+                    let (ph, pc, k) = (j / 96, (j / 16) % 6, j % 16);
+                    format!("pst_fr[{}][{}][{}{}]", if ph == 0 { "mg" } else { "eg" }, pc,
+                        if k < 8 { "file" } else { "rank" }, k % 8)
+                }
+            }
+            pub fn to_vec(&self) -> Vec<i32> {
+                let mut v = vec![$(self.$name,)*];
+                for ph in &self.pst_fr { for pc in ph { v.extend_from_slice(pc); } }
+                v
+            }
+            pub fn from_vec(v: &[i32]) -> Self {
+                let mut it = v.iter();
+                let mut e = EvalParams { $($name: *it.next().expect("vector de pesos corto"),)* pst_fr: [[[0; 16]; 6]; 2] };
+                for ph in e.pst_fr.iter_mut() { for pc in ph.iter_mut() { for x in pc.iter_mut() {
+                    *x = *it.next().expect("vector de pesos corto");
+                } } }
+                e
+            }
+        }
+    };
 }
 
-impl Default for EvalParams {
-    /// Pesos afinados por Texel (descenso por coordenadas sobre 373.893
-    /// posiciones de partidas reales de motores 3000-3600; K=0.8572;
-    /// error 0.140148 -> 0.134527). CANDIDATO: pendiente de validación por
-    /// match — si no gana de forma clara, se revierte a los históricos
-    /// (pawn 100, knight 320, bishop 330, rook 500, queen 900, mobility 4/3,
-    /// doubled 10/20, isolated 12/16, passed 3/4/10/8/4, king 15, tempo 10).
-    fn default() -> Self {
-        EvalParams {
-            pawn: 70,
-            knight: 324,
-            bishop: 356,
-            rook: 505,
-            queen: 1051,
-            mobility_mg: 5,
-            mobility_eg: 15,
-            doubled_mg: 15,
-            doubled_eg: 26,
-            isolated_mg: 0,
-            isolated_eg: 19,
-            passed_base: 3,
-            passed_advancement: 23,
-            passed_protected: 0,
-            passed_connected: 0,
-            passed_king_race: 39,
-            king_open_file: 60,
-            tempo: 6,
-        }
-    }
+/// EVAL-F: valores afinados de la corrección de PST por columna/fila.
+pub const PST_FR_DEFAULT: [[[i32; 16]; 6]; 2] = [
+    [
+        [0, 6, 16, 17, 22, 30, 21, -8, 0, 9, 4, -4, -10, 8, -3, 0],
+        [-16, -5, 3, 12, 20, 18, 17, -2, -1, 3, 13, 18, 20, -7, -10, -62],
+        [-3, 6, 11, 7, 11, 10, 20, 2, -11, 9, 6, 6, -1, -14, -52, -56],
+        [-11, -8, 1, 4, 12, 12, -37, -16, -6, -30, -22, -22, -25, -52, -34, -79],
+        [-2, -2, -5, 1, 8, -11, 2, -3, -1, 10, 6, 3, -9, 1, -24, -46],
+        [-27, 18, 1, -36, -2, -27, 16, 2, 26, 4, 20, -21, -24, 116, -19, -28],
+    ],
+    [
+        [9, 1, 0, -8, -2, -4, -9, 1, 0, 6, -4, -8, -12, 6, 71, 0],
+        [-23, -8, -3, -1, 0, -8, -16, -22, -49, -12, 2, 1, -3, 1, -17, -9],
+        [-13, -2, -1, 1, -1, -3, -8, -9, -22, -17, -1, -1, 8, -2, 2, -33],
+        [17, 18, 15, 10, 2, 4, 21, 7, 8, 7, -3, 5, 13, 12, 11, 28],
+        [-41, -26, -10, -17, -12, 21, 5, 6, -5, -22, 9, 24, 14, -20, -8, 2],
+        [-20, -11, 0, 6, 2, 12, 0, -16, -8, 8, 8, 4, 2, -22, -31, -38],
+    ],
+];
+
+eval_params! {
+    pawn = 89,
+    knight = 382,
+    bishop = 401,
+    rook = 622,
+    queen = 1244,
+    // EXP-0015: movilidad SEGURA por tipo de pieza (casillas no ocupadas por
+    // piezas propias ni atacadas por peones rivales), en cp por casilla.
+    mob_knight_mg = 13,
+    mob_knight_eg = 1,
+    mob_bishop_mg = 9,
+    mob_bishop_eg = 2,
+    mob_rook_mg = 5,
+    mob_rook_eg = 5,
+    mob_queen_mg = 5,
+    mob_queen_eg = 5,
+    doubled_mg = 15,
+    doubled_eg = 19,
+    isolated_mg = 16,
+    isolated_eg = 15,
+    passed_base = 3,
+    passed_advancement = 9,
+    passed_protected = 0,
+    passed_connected = 0,
+    passed_king_race = 23,
+    king_open_file = 21,
+    tempo = 31,
+    // EXP-0015: amenazas y piezas colgadas, outposts de caballo.
+    threat_pawn_mg = 73,
+    threat_pawn_eg = 15,
+    threat_minor_mg = 54,
+    threat_minor_eg = 7,
+    hanging_mg = 23,
+    hanging_eg = 36,
+    outpost_mg = 41,
+    outpost_eg = 12,
+    bishop_pair_mg = 45,
+    bishop_pair_eg = 52,
+    rook_open_mg = 52,
+    rook_open_eg = 0,
+    rook_semi_mg = 14,
+    rook_semi_eg = 15,
+    // EVAL-E: escudo de peones delante del rey (1 y 2 filas), tormenta de
+    // peones rivales que se acercan, y peón pasado bloqueado / con paso libre.
+    shield_near_mg = 12,
+    shield_far_mg = 4,
+    storm_mg = 0,
+    passed_blocked_mg = 0,
+    passed_blocked_eg = 38,
+    passed_free_eg = 13,
 }
 
 fn default_params() -> &'static EvalParams {
@@ -436,18 +498,15 @@ fn material_and_pst_components(
             };
             material_mg += value;
             material_eg += value;
-            pst_mg += p.mg[pt.index()][idx as usize];
-            pst_eg += p.eg[pt.index()][idx as usize];
+            let (f, r) = ((idx & 7) as usize, 8 + (idx >> 3) as usize);
+            let fr = &params.pst_fr;
+            pst_mg += p.mg[pt.index()][idx as usize] + fr[0][pt.index()][f] + fr[0][pt.index()][r];
+            pst_eg += p.eg[pt.index()][idx as usize] + fr[1][pt.index()][f] + fr[1][pt.index()][r];
         }
     }
     ((material_mg, material_eg), (pst_mg, pst_eg))
 }
 
-#[allow(dead_code)]
-fn mobility(board: &Board, color: Color, params: &EvalParams) -> (i32, i32) {
-    let (mg, eg, _) = mobility_and_king_attack(board, color, params);
-    (mg, eg)
-}
 
 // ---------------------------------------------------------------------------
 // EVAL-A — ataque al rey, pareja de alfiles y torres en columnas (diseño propio).
@@ -472,12 +531,6 @@ fn mobility(board: &Board, color: Color, params: &EvalParams) -> (i32, i32) {
 const KA_UNITS: [i32; 6] = [0, 2, 2, 3, 5, 0]; // pawn, knight, bishop, rook, queen, king
 const KA_DIVISOR: i32 = 5;
 const KA_CAP: i32 = 400;
-const BISHOP_PAIR_MG: i32 = 20;
-const BISHOP_PAIR_EG: i32 = 40;
-const ROOK_OPEN_MG: i32 = 20;
-const ROOK_OPEN_EG: i32 = 8;
-const ROOK_SEMI_MG: i32 = 10;
-const ROOK_SEMI_EG: i32 = 4;
 
 fn king_zone(king_sq: Square, king_color: Color) -> u64 {
     let t = tables();
@@ -490,19 +543,54 @@ fn king_zone(king_sq: Square, king_color: Color) -> u64 {
     near | ahead
 }
 
-/// Movilidad (idéntica a la histórica) y, en el mismo recorrido, el ataque de
-/// `color` sobre la zona del rey rival. Devuelve (mob_mg, mob_eg, ataque_mg).
-fn mobility_and_king_attack(board: &Board, color: Color, params: &EvalParams) -> (i32, i32, i32) {
+const FILE_H: u64 = FILE_A << 7;
+
+/// Casillas atacadas por los peones de `color`.
+#[inline]
+fn pawn_attacks_bb(pawns: u64, color: Color) -> u64 {
+    match color {
+        Color::White => ((pawns << 7) & !FILE_H) | ((pawns << 9) & !FILE_A),
+        Color::Black => ((pawns >> 9) & !FILE_H) | ((pawns >> 7) & !FILE_A),
+    }
+}
+
+/// Resultado del recorrido de piezas de un bando.
+struct PieceScan {
+    mob_mg: i32,
+    mob_eg: i32,
+    king_attack: i32,
+    /// Todas las casillas atacadas por el bando (piezas, peones y rey).
+    attacks: u64,
+    /// Casillas atacadas por sus caballos y alfiles.
+    minor_attacks: u64,
+}
+
+/// Movilidad y ataque al rey rival de `color` en un solo recorrido.
+/// EXP-0015: la movilidad es por tipo de pieza y SEGURA (sin contar casillas
+/// propias ni atacadas por peones rivales: ahí la pieza no puede instalarse).
+/// El ataque al rey (EVAL-A) no cambia.
+fn scan_pieces(board: &Board, color: Color, params: &EvalParams) -> PieceScan {
     let t = tables();
     let occ = board.occupancy();
     let own = board.color_occupancy(color);
     let enemy = color.opposite();
     let zone = king_zone(board.king_square(enemy), enemy);
-    let mut count = 0i32;
+    let own_pawns = board.pieces[color.index()][PieceType::Pawn.index()];
+    let enemy_pawn_att = pawn_attacks_bb(board.pieces[enemy.index()][PieceType::Pawn.index()], enemy);
+    let safe = !own & !enemy_pawn_att;
+    let (mut mob_mg, mut mob_eg) = (0i32, 0i32);
     let mut units = 0i32;
     let mut attackers = 0i32;
+    let mut attacks = pawn_attacks_bb(own_pawns, color) | t.king_attacks(board.king_square(color));
+    let mut minor_attacks = 0u64;
 
     for pt in [PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
+        let (wmg, weg) = match pt {
+            PieceType::Knight => (params.mob_knight_mg, params.mob_knight_eg),
+            PieceType::Bishop => (params.mob_bishop_mg, params.mob_bishop_eg),
+            PieceType::Rook => (params.mob_rook_mg, params.mob_rook_eg),
+            _ => (params.mob_queen_mg, params.mob_queen_eg),
+        };
         let mut bb = board.pieces[color.index()][pt.index()];
         while bb != EMPTY {
             let sq = pop_lsb(&mut bb);
@@ -512,7 +600,13 @@ fn mobility_and_king_attack(board: &Board, color: Color, params: &EvalParams) ->
                 PieceType::Rook => t.rook_attacks(sq, occ),
                 _ => t.queen_attacks(sq, occ),
             };
-            count += count_bits(att & !own) as i32;
+            attacks |= att;
+            if matches!(pt, PieceType::Knight | PieceType::Bishop) {
+                minor_attacks |= att;
+            }
+            let n = count_bits(att & safe) as i32;
+            mob_mg += n * wmg;
+            mob_eg += n * weg;
             let hits = count_bits(att & zone) as i32;
             if hits > 0 {
                 attackers += 1;
@@ -521,14 +615,137 @@ fn mobility_and_king_attack(board: &Board, color: Color, params: &EvalParams) ->
         }
     }
 
-    let mut attack = 0;
+    let mut king_attack = 0;
     if attackers >= 2 {
-        attack = (units * units / KA_DIVISOR).min(KA_CAP);
+        king_attack = (units * units / KA_DIVISOR).min(KA_CAP);
         if board.pieces[color.index()][PieceType::Queen.index()] == EMPTY {
-            attack /= 2;
+            king_attack /= 2;
         }
     }
-    (count * params.mobility_mg, count * params.mobility_eg, attack)
+    PieceScan { mob_mg, mob_eg, king_attack, attacks, minor_attacks }
+}
+
+/// EXP-0015 (EVAL-D): amenazas de `color` sobre el rival y outposts propios.
+/// - Pieza (N, B, R, Q) rival atacada por un peón propio: casi siempre gana
+///   material o fuerza una retirada con pérdida de tiempo.
+/// - Torre o dama rival atacada por una menor propia: mismo motivo.
+/// - Pieza rival colgada: atacada y sin ninguna defensa.
+/// - Outpost: caballo propio en las filas 4–6 relativas, defendido por un peón
+///   y fuera del alcance futuro de los peones rivales (columnas adyacentes).
+fn threats_and_outposts(
+    board: &Board,
+    color: Color,
+    params: &EvalParams,
+    own: &PieceScan,
+    their: &PieceScan,
+) -> (i32, i32) {
+    let (xmg, xeg) = king_shelter_and_passers(board, color, params, their);
+    let (tmg, teg) = threats_core(board, color, params, own, their);
+    (xmg + tmg, xeg + teg)
+}
+
+/// EVAL-E (diseño propio):
+/// - ESCUDO: con el rey propio en sus dos primeras filas, cada peón propio en
+///   las columnas del rey y adyacentes, una fila por delante (`near`) o dos
+///   (`far`), suma: es la cobertura que impide abrir líneas contra el rey.
+/// - TORMENTA: peones rivales en esas columnas que ya están a <= 3 filas del
+///   rey propio: preparan la apertura de columnas (penaliza, solo mg).
+/// - PASADOS: la casilla delante ocupada por una pieza rival (bloqueo) resta;
+///   vacía y no atacada por el rival suma, creciendo con el avance (solo eg).
+fn king_shelter_and_passers(board: &Board, color: Color, params: &EvalParams, their: &PieceScan) -> (i32, i32) {
+    let ci = color.index();
+    let ei = color.opposite().index();
+    let own_pawns = board.pieces[ci][PieceType::Pawn.index()];
+    let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
+    let mut mg = 0;
+    let mut eg = 0;
+
+    let ksq = board.king_square(color);
+    let (kf, kr) = (file_of(ksq) as i32, rank_of(ksq) as i32);
+    let rel = |r: i32| if color == Color::White { r } else { 7 - r };
+    if rel(kr) <= 1 {
+        for f in (kf - 1).max(0)..=(kf + 1).min(7) {
+            let file_mask = FILE_A << f;
+            let mut own_on = own_pawns & file_mask;
+            while own_on != EMPTY {
+                let sq = pop_lsb(&mut own_on);
+                let d = rel(rank_of(sq) as i32) - rel(kr);
+                if d == 1 {
+                    mg += params.shield_near_mg;
+                } else if d == 2 {
+                    mg += params.shield_far_mg;
+                }
+            }
+            let mut en_on = enemy_pawns & file_mask;
+            while en_on != EMPTY {
+                let sq = pop_lsb(&mut en_on);
+                let d = rel(rank_of(sq) as i32) - rel(kr);
+                if (1..=3).contains(&d) {
+                    mg -= params.storm_mg;
+                }
+            }
+        }
+    }
+
+    let occ_enemy = board.color_occupancy(color.opposite());
+    let mut pawns = own_pawns;
+    while pawns != EMPTY {
+        let sq = pop_lsb(&mut pawns);
+        if !is_passed_pawn(enemy_pawns, color, sq) {
+            continue;
+        }
+        let ahead = if color == Color::White { sq + 8 } else { sq.wrapping_sub(8) };
+        if ahead >= 64 {
+            continue;
+        }
+        let ahead_bb = 1u64 << ahead;
+        if occ_enemy & ahead_bb != EMPTY {
+            mg -= params.passed_blocked_mg;
+            eg -= params.passed_blocked_eg;
+        } else if board.occupancy() & ahead_bb == EMPTY && their.attacks & ahead_bb == EMPTY {
+            eg += params.passed_free_eg * rel(rank_of(sq) as i32);
+        }
+    }
+    (mg, eg)
+}
+
+fn threats_core(
+    board: &Board,
+    color: Color,
+    params: &EvalParams,
+    own: &PieceScan,
+    their: &PieceScan,
+) -> (i32, i32) {
+    let enemy = color.opposite();
+    let ei = enemy.index();
+    let ci = color.index();
+    let pieces = board.pieces[ei][PieceType::Knight.index()]
+        | board.pieces[ei][PieceType::Bishop.index()]
+        | board.pieces[ei][PieceType::Rook.index()]
+        | board.pieces[ei][PieceType::Queen.index()];
+    let majors = board.pieces[ei][PieceType::Rook.index()] | board.pieces[ei][PieceType::Queen.index()];
+    let own_pawn_att = pawn_attacks_bb(board.pieces[ci][PieceType::Pawn.index()], color);
+    let by_pawn = count_bits(pieces & own_pawn_att) as i32;
+    let by_minor = count_bits(majors & own.minor_attacks) as i32;
+    let hanging = count_bits(pieces & own.attacks & !their.attacks) as i32;
+    let mut mg = by_pawn * params.threat_pawn_mg + by_minor * params.threat_minor_mg + hanging * params.hanging_mg;
+    let mut eg = by_pawn * params.threat_pawn_eg + by_minor * params.threat_minor_eg + hanging * params.hanging_eg;
+
+    let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
+    let mut knights = board.pieces[ci][PieceType::Knight.index()] & own_pawn_att;
+    while knights != EMPTY {
+        let sq = pop_lsb(&mut knights);
+        let rel_rank = if color == Color::White { rank_of(sq) } else { 7 - rank_of(sq) };
+        if !(3..=5).contains(&rel_rank) {
+            continue;
+        }
+        let file_mask = FILE_A << file_of(sq);
+        if enemy_pawns & PASSED_MASK[ci][sq as usize] & !file_mask == EMPTY {
+            mg += params.outpost_mg;
+            eg += params.outpost_eg;
+        }
+    }
+    (mg, eg)
 }
 
 /// Pareja de alfiles y torres en columnas abiertas/semiabiertas de `color`.
@@ -537,12 +754,12 @@ fn mobility_and_king_attack(board: &Board, color: Color, params: &EvalParams) ->
 /// TORRES: una torre sin peones propios delante tiene la columna para entrar;
 /// abierta del todo (sin peones) vale el doble que semiabierta. Más en medio
 /// juego (presión sobre el enroque / 7ª) que en el final.
-fn piece_extras(board: &Board, color: Color) -> (i32, i32) {
+fn piece_extras(board: &Board, color: Color, params: &EvalParams) -> (i32, i32) {
     let mut mg = 0;
     let mut eg = 0;
     if count_bits(board.pieces[color.index()][PieceType::Bishop.index()]) >= 2 {
-        mg += BISHOP_PAIR_MG;
-        eg += BISHOP_PAIR_EG;
+        mg += params.bishop_pair_mg;
+        eg += params.bishop_pair_eg;
     }
     let own_pawns = board.pieces[color.index()][PieceType::Pawn.index()];
     let enemy_pawns = board.pieces[color.opposite().index()][PieceType::Pawn.index()];
@@ -552,11 +769,11 @@ fn piece_extras(board: &Board, color: Color) -> (i32, i32) {
         let file_mask: u64 = FILE_A << file_of(sq);
         if own_pawns & file_mask == EMPTY {
             if enemy_pawns & file_mask == EMPTY {
-                mg += ROOK_OPEN_MG;
-                eg += ROOK_OPEN_EG;
+                mg += params.rook_open_mg;
+                eg += params.rook_open_eg;
             } else {
-                mg += ROOK_SEMI_MG;
-                eg += ROOK_SEMI_EG;
+                mg += params.rook_semi_mg;
+                eg += params.rook_semi_eg;
             }
         }
     }
@@ -836,6 +1053,122 @@ fn king_safety(board: &Board, color: Color, params: &EvalParams) -> i32 {
     score
 }
 
+// ---------------------------------------------------------------------------
+// EXP-0012 (EVAL-C) — conocimiento de finales (diseño propio).
+//
+// La eval sumaba material sin saber si ese material PUEDE ganar: KB contra K
+// valía +3 peones y KR contra KB, +2. La búsqueda no lo corrige a STC (el mate o
+// la tablas quedan a decenas de plies), así que el motor evitaba cambios que
+// llevaban a tablas seguras, o los buscaba creyendo que ganaba. Reglas:
+//   1. Material insuficiente sin peones (K, K+menor, K+N+N contra K o K+menor):
+//      eval 0 exacto.
+//   2. El bando que va ganando no tiene peones: si solo tiene una menor, no
+//      puede ganar (score/16); si su ventaja en piezas es menor que una torre
+//      (KRKB, KRKN, KRBKR, KQKRB…), el final es muy tablífero (score/4).
+//   3. Alfiles de distinto color "puros" (cada bando: un alfil, sin más piezas
+//      que peones y reyes): los peones de más valen mucho menos (score/2).
+//   4. Mop-up: contra un rey desnudo, premio por empujarlo al borde y acercar
+//      el rey propio, para que el motor convierta KQK/KRK/KBBK/KBNK sin depender
+//      de ver el mate en la búsqueda.
+// Las fracciones son propias, por razonamiento (umbral de "no puede ganar" =
+// una torre de ventaja), no afinadas ni copiadas.
+// ---------------------------------------------------------------------------
+#[derive(Clone, Copy)]
+struct SideMaterial {
+    pawns: i32,
+    knights: i32,
+    bishops: i32,
+    rooks: i32,
+    queens: i32,
+}
+
+impl SideMaterial {
+    fn of(board: &Board, color: Color) -> Self {
+        let c = color.index();
+        SideMaterial {
+            pawns: count_bits(board.pieces[c][PieceType::Pawn.index()]) as i32,
+            knights: count_bits(board.pieces[c][PieceType::Knight.index()]) as i32,
+            bishops: count_bits(board.pieces[c][PieceType::Bishop.index()]) as i32,
+            rooks: count_bits(board.pieces[c][PieceType::Rook.index()]) as i32,
+            queens: count_bits(board.pieces[c][PieceType::Queen.index()]) as i32,
+        }
+    }
+    fn minors(&self) -> i32 {
+        self.knights + self.bishops
+    }
+    fn pieces(&self) -> i32 {
+        self.minors() + self.rooks + self.queens
+    }
+    fn npm(&self, p: &EvalParams) -> i32 {
+        self.knights * p.knight + self.bishops * p.bishop + self.rooks * p.rook + self.queens * p.queen
+    }
+}
+
+const LIGHT_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
+
+/// Ajuste de finales sobre el score blanco-relativo ya interpolado.
+fn endgame_adjust(board: &Board, score: i32, params: &EvalParams) -> i32 {
+    let w = SideMaterial::of(board, Color::White);
+    let b = SideMaterial::of(board, Color::Black);
+
+    // 1. Material insuficiente (sin peones en el tablero).
+    if w.pawns == 0 && b.pawns == 0 {
+        let weak_only = |m: &SideMaterial| m.rooks == 0 && m.queens == 0 && m.minors() <= 1;
+        let nn_only = |m: &SideMaterial| m.rooks == 0 && m.queens == 0 && m.bishops == 0 && m.knights == 2;
+        if (weak_only(&w) || nn_only(&w)) && (weak_only(&b) || nn_only(&b)) {
+            return 0;
+        }
+    }
+
+    let (strong, weak, strong_color) = if score > 0 {
+        (w, b, Color::White)
+    } else {
+        (b, w, Color::Black)
+    };
+    let mut adjusted = score;
+
+    // 2. El bando fuerte sin peones.
+    if strong.pawns == 0 && score != 0 {
+        if strong.rooks == 0 && strong.queens == 0 && strong.minors() <= 1 {
+            adjusted /= 16;
+        } else if strong.npm(params) - weak.npm(params) < params.rook {
+            adjusted /= 4;
+        }
+    }
+
+    // 3. Alfiles de distinto color puros.
+    if w.bishops == 1
+        && b.bishops == 1
+        && w.pieces() == 1
+        && b.pieces() == 1
+    {
+        let wb = board.pieces[Color::White.index()][PieceType::Bishop.index()];
+        let bb = board.pieces[Color::Black.index()][PieceType::Bishop.index()];
+        if ((wb & LIGHT_SQUARES) != 0) != ((bb & LIGHT_SQUARES) != 0) {
+            adjusted /= 2;
+        }
+    }
+
+    // 4. Mop-up contra rey desnudo, con material de mate.
+    if weak.pawns == 0 && weak.pieces() == 0 && strong.pawns == 0 {
+        let can_mate = strong.queens > 0
+            || strong.rooks > 0
+            || strong.bishops >= 2
+            || (strong.bishops >= 1 && strong.knights >= 1);
+        if can_mate {
+            let wk = board.king_square(strong_color.opposite());
+            let sk = board.king_square(strong_color);
+            let (wf, wr) = (file_of(wk) as i32, rank_of(wk) as i32);
+            let (sf, sr) = (file_of(sk) as i32, rank_of(sk) as i32);
+            let edge = (3 - wf).max(wf - 4) + (3 - wr).max(wr - 4); // 0 (centro) .. 6 (esquina)
+            let dist = (wf - sf).abs() + (wr - sr).abs(); // 1 .. 14
+            let bonus = 20 * edge + 6 * (14 - dist);
+            adjusted += if strong_color == Color::White { bonus } else { -bonus };
+        }
+    }
+    adjusted
+}
+
 /// Puntuación relativa a quien tiene el turno (positivo = bueno para el que mueve).
 pub fn evaluate(board: &Board) -> i32 {
     breakdown(board).total
@@ -856,6 +1189,8 @@ pub struct EvalBreakdown {
     pub mobility: i32,
     pub king_safety: i32,
     pub tempo: i32,
+    /// EXP-0012: ajuste de finales (escalado, tablas por material, mop-up).
+    pub endgame: i32,
     pub total: i32,
 }
 
@@ -886,10 +1221,14 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
     let (b_material, b_pst) = material_and_pst_components(board, Color::Black, params);
     let (w_mg, w_eg) = (w_material.0 + w_pst.0, w_material.1 + w_pst.1);
     let (b_mg, b_eg) = (b_material.0 + b_pst.0, b_material.1 + b_pst.1);
-    let (wm_mg, wm_eg, w_attack) = mobility_and_king_attack(board, Color::White, params);
-    let (bm_mg, bm_eg, b_attack) = mobility_and_king_attack(board, Color::Black, params);
-    let (wx_mg, wx_eg) = piece_extras(board, Color::White);
-    let (bx_mg, bx_eg) = piece_extras(board, Color::Black);
+    let ws = scan_pieces(board, Color::White, params);
+    let bs = scan_pieces(board, Color::Black, params);
+    let (wm_mg, wm_eg, w_attack) = (ws.mob_mg, ws.mob_eg, ws.king_attack);
+    let (bm_mg, bm_eg, b_attack) = (bs.mob_mg, bs.mob_eg, bs.king_attack);
+    let (wt_mg, wt_eg) = threats_and_outposts(board, Color::White, params, &ws, &bs);
+    let (bt_mg, bt_eg) = threats_and_outposts(board, Color::Black, params, &bs, &ws);
+    let (wx_mg, wx_eg) = piece_extras(board, Color::White, params);
+    let (bx_mg, bx_eg) = piece_extras(board, Color::Black, params);
     let (w_pawns, w_passed) = pawn_structure_components(board, Color::White, params);
     let (b_pawns, b_passed) = pawn_structure_components(board, Color::Black, params);
     let (wp_mg, wp_eg) = (w_pawns.0 + w_passed.0, w_pawns.1 + w_passed.1);
@@ -899,12 +1238,15 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
 
     // EVAL-A: el ataque de un bando cuenta como seguridad NEGATIVA del rival
     // (mismo signo que king_safety), y las piezas extra suman a su bando.
-    let mg = (w_mg + wm_mg + wp_mg + wk + w_attack + wx_mg)
-        - (b_mg + bm_mg + bp_mg + bk + b_attack + bx_mg);
-    let eg = (w_eg + wm_eg + wp_eg + wx_eg) - (b_eg + bm_eg + bp_eg + bx_eg);
+    let mg = (w_mg + wm_mg + wp_mg + wk + w_attack + wx_mg + wt_mg)
+        - (b_mg + bm_mg + bp_mg + bk + b_attack + bx_mg + bt_mg);
+    let eg = (w_eg + wm_eg + wp_eg + wx_eg + wt_eg) - (b_eg + bm_eg + bp_eg + bx_eg + bt_eg);
 
     let phase = game_phase(board);
-    let score = taper(mg, eg, phase);
+    let tapered = taper(mg, eg, phase);
+    let score = endgame_adjust(board, tapered, params);
+    // EXP-0012: con material insuficiente la posición es tablas: sin tempo.
+    let tempo = if score == 0 && tapered != 0 { 0 } else { params.tempo };
 
     // Convertimos primero a la perspectiva de quien mueve...
     let relative = relative_to_move(board, score);
@@ -934,11 +1276,16 @@ pub fn breakdown_with(board: &Board, params: &EvalParams) -> EvalBreakdown {
         ),
         mobility: relative_to_move(
             board,
-            taper(wm_mg + wx_mg - bm_mg - bx_mg, wm_eg + wx_eg - bm_eg - bx_eg, phase),
+            taper(
+                wm_mg + wx_mg + wt_mg - bm_mg - bx_mg - bt_mg,
+                wm_eg + wx_eg + wt_eg - bm_eg - bx_eg - bt_eg,
+                phase,
+            ),
         ),
         king_safety: relative_to_move(board, (wk + w_attack) - (bk + b_attack)),
-        tempo: params.tempo,
-        total: relative + params.tempo,
+        tempo,
+        endgame: relative_to_move(board, score - tapered),
+        total: relative + tempo,
     }
 }
 
@@ -957,6 +1304,7 @@ pub fn trace(board: &Board) -> String {
          eval mobility {}\n\
          eval king_safety {}\n\
          eval tempo {}\n\
+         eval endgame {}\n\
          eval total {}\n",
         breakdown.material,
         breakdown.piece_square,
@@ -965,6 +1313,7 @@ pub fn trace(board: &Board) -> String {
         breakdown.mobility,
         breakdown.king_safety,
         breakdown.tempo,
+        breakdown.endgame,
         breakdown.total
     )
 }
@@ -972,6 +1321,33 @@ pub fn trace(board: &Board) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insufficient_material_is_a_draw() {
+        for fen in [
+            "8/8/4k3/8/8/3BK3/8/8 w - - 0 1",
+            "8/8/4k3/8/8/3NK3/8/8 b - - 0 1",
+            "8/8/4k3/8/8/2NNK3/8/8 w - - 0 1",
+            "8/8/3bk3/8/8/3NK3/8/8 w - - 0 1",
+        ] {
+            assert_eq!(evaluate(&Board::from_fen(fen).unwrap()), 0, "{fen}");
+        }
+    }
+
+    #[test]
+    fn rook_vs_minor_without_pawns_is_scaled_down() {
+        let krkb = evaluate(&Board::from_fen("8/8/4k3/3b4/8/3RK3/8/8 w - - 0 1").unwrap());
+        assert!(krkb > 0 && krkb < 100, "KRKB debe ser ventaja pequeña: {krkb}");
+        let krk = evaluate(&Board::from_fen("8/8/4k3/8/8/3RK3/8/8 w - - 0 1").unwrap());
+        assert!(krk > 400, "KRK es ganado: {krk}");
+    }
+
+    #[test]
+    fn mop_up_prefers_enemy_king_on_edge() {
+        let center = evaluate(&Board::from_fen("8/8/8/3k4/8/8/8/R3K3 w - - 0 1").unwrap());
+        let edge = evaluate(&Board::from_fen("k7/8/8/8/8/8/8/R3K3 w - - 0 1").unwrap());
+        assert!(edge > center, "edge {edge} center {center}");
+    }
 
     #[test]
     fn startpos_is_roughly_balanced() {

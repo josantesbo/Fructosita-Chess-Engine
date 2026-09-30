@@ -294,17 +294,28 @@ fn sigmoid(eval_cp: f64, k: f64) -> f64 {
 /// convierte a perspectiva de las blancas porque el resultado (1/0.5/0) lo
 /// está.
 pub fn error(dataset: &Dataset, params: &EvalParams, k: f64) -> f64 {
-    let mut total = 0.0;
-    for (board, result) in &dataset.entries {
-        let relative = evaluate_with(board, params);
-        let white = if board.side_to_move == Color::White {
-            relative
-        } else {
-            -relative
-        };
-        let diff = result - sigmoid(white as f64, k);
-        total += diff * diff;
-    }
+    // EXP-0015: en paralelo por bloques (la suma por bloque es determinista).
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(4);
+    let chunk = dataset.entries.len().div_ceil(threads);
+    let total: f64 = std::thread::scope(|sc| {
+        let handles: Vec<_> = dataset
+            .entries
+            .chunks(chunk.max(1))
+            .map(|part| {
+                sc.spawn(move || {
+                    let mut acc = 0.0;
+                    for (board, result) in part {
+                        let relative = evaluate_with(board, params);
+                        let white = if board.side_to_move == Color::White { relative } else { -relative };
+                        let diff = result - sigmoid(white as f64, k);
+                        acc += diff * diff;
+                    }
+                    acc
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    });
     total / dataset.entries.len() as f64
 }
 
@@ -336,101 +347,31 @@ pub fn fit_k(dataset: &Dataset, params: &EvalParams) -> f64 {
     (lo + hi) / 2.0
 }
 
-/// Los 18 pesos como vector mutable, con nombre, para el descenso por
-/// coordenadas. (El orden define el orden de visita en cada pasada.)
-const PARAM_NAMES: [&str; 18] = [
-    "pawn",
-    "knight",
-    "bishop",
-    "rook",
-    "queen",
-    "mobility_mg",
-    "mobility_eg",
-    "doubled_mg",
-    "doubled_eg",
-    "isolated_mg",
-    "isolated_eg",
-    "passed_base",
-    "passed_advancement",
-    "passed_protected",
-    "passed_connected",
-    "passed_king_race",
-    "king_open_file",
-    "tempo",
-];
-
-fn to_vec(p: &EvalParams) -> [i32; 18] {
-    [
-        p.pawn,
-        p.knight,
-        p.bishop,
-        p.rook,
-        p.queen,
-        p.mobility_mg,
-        p.mobility_eg,
-        p.doubled_mg,
-        p.doubled_eg,
-        p.isolated_mg,
-        p.isolated_eg,
-        p.passed_base,
-        p.passed_advancement,
-        p.passed_protected,
-        p.passed_connected,
-        p.passed_king_race,
-        p.king_open_file,
-        p.tempo,
-    ]
-}
-
-fn from_vec(v: &[i32; 18]) -> EvalParams {
-    EvalParams {
-        pawn: v[0],
-        knight: v[1],
-        bishop: v[2],
-        rook: v[3],
-        queen: v[4],
-        mobility_mg: v[5],
-        mobility_eg: v[6],
-        doubled_mg: v[7],
-        doubled_eg: v[8],
-        isolated_mg: v[9],
-        isolated_eg: v[10],
-        passed_base: v[11],
-        passed_advancement: v[12],
-        passed_protected: v[13],
-        passed_connected: v[14],
-        passed_king_race: v[15],
-        king_open_file: v[16],
-        tempo: v[17],
-    }
-}
-
 /// Descenso por coordenadas clásico del método Texel: para cada peso prueba
 /// +paso y −paso y se queda con lo que reduzca el error; repite pasadas
 /// hasta que ninguna mejora, y entonces reduce el paso. Determinista.
 pub fn tune(dataset: &Dataset, start: &EvalParams, k: f64) -> (EvalParams, f64, f64) {
-    let mut v = to_vec(start);
+    let scalars = EvalParams::scalar_count();
+    let mut v = start.to_vec();
     let e0 = error(dataset, start, k);
     let mut best_e = e0;
-    for &step in &[16, 8, 4, 2, 1] {
+    for &step in &[8, 4, 2, 1] {
         loop {
             let mut improved = false;
             for i in 0..v.len() {
                 for delta in [step, -step] {
                     let old = v[i];
                     let candidate = old + delta;
-                    // los pesos de este conjunto no tienen sentido negativos
-                    if candidate < 0 {
+                    // los escalares no tienen sentido negativos (las correcciones
+                    // de PST de EVAL-F sí pueden serlo)
+                    if candidate < 0 && i < scalars {
                         continue;
                     }
                     v[i] = candidate;
-                    let e = error(dataset, &from_vec(&v), k);
+                    let e = error(dataset, &EvalParams::from_vec(&v), k);
                     if e < best_e {
                         best_e = e;
-                        eprintln!(
-                            "  paso {step}: {} {} -> {} (E {:.6})",
-                            PARAM_NAMES[i], old, candidate, best_e
-                        );
+                        eprintln!("  paso {step}: {} {} -> {} (E {:.6})", EvalParams::param_name(i), old, candidate, best_e);
                         improved = true;
                         break; // el peso cambió: siguiente peso
                     }
@@ -441,8 +382,9 @@ pub fn tune(dataset: &Dataset, start: &EvalParams, k: f64) -> (EvalParams, f64, 
                 break;
             }
         }
+        eprintln!("paso {step} terminado: {:?}", v);
     }
-    (from_vec(&v), e0, best_e)
+    (EvalParams::from_vec(&v), e0, best_e)
 }
 
 #[cfg(test)]

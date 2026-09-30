@@ -3,21 +3,21 @@
 //! ella por distintos órdenes de movimientos, y guarda el mejor movimiento
 //! encontrado para mejorar el ordenamiento de movimientos en visitas futuras.
 //!
-//! Diseño para Lazy SMP: la tabla se divide en muchos "shards" (fragmentos)
-//! independientes, cada uno protegido por su propio `Mutex`. Varios hilos de
-//! búsqueda pueden compartir la MISMA tabla (vía `Arc<TranspositionTable>`)
-//! y probarla/escribirla concurrentemente: solo se bloquean entre sí si dos
-//! hilos golpean el mismo shard exactamente al mismo tiempo, algo raro con
-//! suficientes shards. Se eligió esta técnica (candados finos) en vez del
-//! "lockless hashing" de motores como Stockfish (empaquetar la entrada en
-//! enteros atómicos, tolerando lecturas parcialmente corruptas gracias a la
-//! verificación de la clave) porque es igual de segura en la práctica para
-//! la cantidad de hilos que tiene sentido usar en una laptop normal, y con
-//! muchísimo menor riesgo de bugs sutiles de concurrencia.
+//! EXP-0013 (SPEED-A): diseño sin locks. Antes cada acceso tomaba el `Mutex`
+//! de un shard y cada entrada ocupaba 24 bytes (con Hash=64 la tabla usaba en
+//! realidad 96 MB). Ahora cada entrada son dos `AtomicU64` (16 bytes):
+//!   - `data`: jugada, score, profundidad, cota y generación empaquetados;
+//!   - `check`: la clave Zobrist XOR `data`.
+//! Una lectura válida exige `check ^ data == clave`: si otro hilo escribió a
+//! medias (una palabra nueva y otra vieja), la verificación falla y la entrada
+//! se trata como ausente, nunca como una mezcla corrupta. Es el esquema
+//! "lockless hashing" público (Hyatt y Mann), implementado aquí desde cero.
+//! Mismo número de entradas y misma regla de reemplazo que antes: la búsqueda
+//! de un hilo es idéntica (misma firma de bench).
 
-use crate::moves::Move;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::Mutex;
+use crate::moves::{Move, MoveKind};
+use crate::types::PieceType;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TTFlag {
@@ -29,17 +29,6 @@ pub enum TTFlag {
     UpperBound,
 }
 
-#[derive(Clone, Copy)]
-struct TTEntry {
-    key: u64,
-    depth: i8,
-    score: i32,
-    flag: TTFlag,
-    best_move: Option<Move>,
-    /// Generación (búsqueda `go`) en la que se escribió la entrada. EXP-0005.
-    generation: u8,
-}
-
 pub struct TTProbe {
     pub depth: i8,
     pub score: i32,
@@ -47,51 +36,125 @@ pub struct TTProbe {
     pub best_move: Option<Move>,
 }
 
-/// Cantidad de fragmentos independientes. Con este número, incluso con
-/// varios hilos golpeando la tabla constantemente, la probabilidad de que
-/// dos caigan en el mismo fragmento a la vez es baja.
-const NUM_SHARDS: usize = 1024;
-
-struct Shard {
-    entries: Mutex<Vec<Option<TTEntry>>>,
+struct Slot {
+    check: AtomicU64,
+    data: AtomicU64,
 }
 
 pub struct TranspositionTable {
-    shards: Vec<Shard>,
-    entries_per_shard: usize,
+    slots: Vec<Slot>,
     total_mask: usize,
     /// Generación actual: se incrementa al empezar cada búsqueda (`go`).
     /// EXP-0005 (envejecimiento): una entrada de una búsqueda anterior se puede
-    /// reemplazar aunque sea más profunda. Sin esto, la regla "reemplazar si
-    /// depth <=" deja la tabla llena de entradas profundas de jugadas ya
-    /// pasadas que nunca se sustituyen durante la partida.
+    /// reemplazar aunque sea más profunda.
     generation: AtomicU8,
+}
+
+// Disposición de `data` (bits):
+//   0..16  jugada (from 6 | to 6 | tipo 4), 16 = hay jugada
+//   17..33 score (i16)
+//   33..41 profundidad (i8)
+//   41..43 cota
+//   43..51 generación
+//   51     entrada ocupada
+const VALID_BIT: u64 = 1 << 51;
+
+fn encode_kind(k: MoveKind) -> u64 {
+    let promo = |p: PieceType| match p {
+        PieceType::Knight => 0,
+        PieceType::Bishop => 1,
+        PieceType::Rook => 2,
+        _ => 3,
+    };
+    match k {
+        MoveKind::Quiet => 0,
+        MoveKind::DoublePawnPush => 1,
+        MoveKind::Capture => 2,
+        MoveKind::EnPassantCapture => 3,
+        MoveKind::CastleKingside => 4,
+        MoveKind::CastleQueenside => 5,
+        MoveKind::Promotion(p) => 6 + promo(p),
+        MoveKind::PromotionCapture(p) => 10 + promo(p),
+    }
+}
+
+fn decode_kind(c: u64) -> MoveKind {
+    let promo = |i: u64| match i {
+        0 => PieceType::Knight,
+        1 => PieceType::Bishop,
+        2 => PieceType::Rook,
+        _ => PieceType::Queen,
+    };
+    match c {
+        0 => MoveKind::Quiet,
+        1 => MoveKind::DoublePawnPush,
+        2 => MoveKind::Capture,
+        3 => MoveKind::EnPassantCapture,
+        4 => MoveKind::CastleKingside,
+        5 => MoveKind::CastleQueenside,
+        6..=9 => MoveKind::Promotion(promo(c - 6)),
+        _ => MoveKind::PromotionCapture(promo(c - 10)),
+    }
+}
+
+fn pack(depth: i8, score: i32, flag: TTFlag, best_move: Option<Move>, generation: u8) -> u64 {
+    let mv = match best_move {
+        Some(m) => (1 << 16) | (m.from as u64) | ((m.to as u64) << 6) | (encode_kind(m.kind) << 12),
+        None => 0,
+    };
+    let flag = match flag {
+        TTFlag::Exact => 0u64,
+        TTFlag::LowerBound => 1,
+        TTFlag::UpperBound => 2,
+    };
+    mv | (((score as i16) as u16 as u64) << 17)
+        | ((depth as u8 as u64) << 33)
+        | (flag << 41)
+        | ((generation as u64) << 43)
+        | VALID_BIT
+}
+
+#[inline]
+fn unpack_depth(d: u64) -> i8 {
+    ((d >> 33) & 0xFF) as u8 as i8
+}
+
+#[inline]
+fn unpack_generation(d: u64) -> u8 {
+    ((d >> 43) & 0xFF) as u8
+}
+
+fn unpack(d: u64) -> TTProbe {
+    let best_move = if d & (1 << 16) != 0 {
+        Some(Move::new((d & 63) as u8, ((d >> 6) & 63) as u8, decode_kind((d >> 12) & 15)))
+    } else {
+        None
+    };
+    TTProbe {
+        depth: unpack_depth(d),
+        score: ((d >> 17) & 0xFFFF) as u16 as i16 as i32,
+        flag: match (d >> 41) & 3 {
+            0 => TTFlag::Exact,
+            1 => TTFlag::LowerBound,
+            _ => TTFlag::UpperBound,
+        },
+        best_move,
+    }
 }
 
 impl TranspositionTable {
     pub fn new(mb: usize) -> Self {
         let bytes = mb.max(1) * 1024 * 1024;
-        let entry_size = std::mem::size_of::<Option<TTEntry>>().max(1);
-        let mut total_entries = (bytes / entry_size).max(NUM_SHARDS);
-        total_entries = total_entries.next_power_of_two();
-        // No pasarnos de más del doble del tamaño pedido.
-        if total_entries > (bytes / entry_size).max(NUM_SHARDS) * 2 {
-            total_entries /= 2;
-        }
-        let num_shards = NUM_SHARDS.min(total_entries);
-        let entries_per_shard = (total_entries / num_shards).max(1);
-        let actual_total = entries_per_shard * num_shards;
-
-        let shards = (0..num_shards)
-            .map(|_| Shard {
-                entries: Mutex::new(vec![None; entries_per_shard]),
-            })
+        let wanted = (bytes / std::mem::size_of::<Slot>()).max(1024);
+        // La mayor potencia de dos que cabe en lo pedido: nunca se excede el
+        // tamaño que fija la opción UCI `Hash`.
+        let total = if wanted.is_power_of_two() { wanted } else { wanted.next_power_of_two() / 2 };
+        let slots = (0..total)
+            .map(|_| Slot { check: AtomicU64::new(0), data: AtomicU64::new(0) })
             .collect();
-
         TranspositionTable {
-            shards,
-            entries_per_shard,
-            total_mask: actual_total - 1,
+            slots,
+            total_mask: total - 1,
             generation: AtomicU8::new(0),
         }
     }
@@ -102,64 +165,60 @@ impl TranspositionTable {
     }
 
     #[inline(always)]
-    fn locate(&self, key: u64) -> (usize, usize) {
-        let global = (key as usize) & self.total_mask;
-        (
-            global / self.entries_per_shard,
-            global % self.entries_per_shard,
-        )
+    fn slot(&self, key: u64) -> &Slot {
+        &self.slots[(key as usize) & self.total_mask]
     }
 
-    /// Vacía todas las entradas. Seguro de llamar con la tabla compartida
-    /// (`&self`, gracias a los `Mutex` internos), pero en la práctica el
-    /// motor solo lo hace cuando no hay ninguna búsqueda en curso.
+    /// Adelanta a la caché la línea de la entrada de `key`. No cambia nada del
+    /// resultado: solo oculta la latencia de memoria del `probe` que vendrá.
+    #[inline(always)]
+    pub fn prefetch(&self, key: u64) {
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(self.slot(key) as *const Slot as *const i8, _MM_HINT_T0);
+        }
+    }
+
+    /// Vacía todas las entradas. Solo se llama sin búsqueda en curso.
     pub fn clear(&self) {
-        for shard in &self.shards {
-            let mut entries = shard.entries.lock().unwrap();
-            for e in entries.iter_mut() {
-                *e = None;
-            }
+        for s in &self.slots {
+            s.check.store(0, Ordering::Relaxed);
+            s.data.store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    fn read(&self, key: u64) -> Option<u64> {
+        let s = self.slot(key);
+        let data = s.data.load(Ordering::Relaxed);
+        let check = s.check.load(Ordering::Relaxed);
+        if data & VALID_BIT != 0 && check ^ data == key {
+            Some(data)
+        } else {
+            None
         }
     }
 
     pub fn probe(&self, key: u64) -> Option<TTProbe> {
-        let (shard_idx, local_idx) = self.locate(key);
-        let entries = self.shards[shard_idx].entries.lock().unwrap();
-        if let Some(entry) = &entries[local_idx] {
-            if entry.key == key {
-                return Some(TTProbe {
-                    depth: entry.depth,
-                    score: entry.score,
-                    flag: entry.flag,
-                    best_move: entry.best_move,
-                });
-            }
-        }
-        None
+        self.read(key).map(unpack)
     }
 
     pub fn store(&self, key: u64, depth: i32, score: i32, flag: TTFlag, best_move: Option<Move>) {
-        let (shard_idx, local_idx) = self.locate(key);
         let depth = depth.clamp(0, i8::MAX as i32) as i8;
         let generation = self.generation.load(Ordering::Relaxed);
-        let mut entries = self.shards[shard_idx].entries.lock().unwrap();
-        let replace = match &entries[local_idx] {
-            None => true,
-            Some(existing) => {
-                existing.key == key
-                    || existing.generation != generation
-                    || existing.depth <= depth
-            }
+        let s = self.slot(key);
+        let old = s.data.load(Ordering::Relaxed);
+        let replace = if old & VALID_BIT == 0 {
+            true
+        } else {
+            let old_key = s.check.load(Ordering::Relaxed) ^ old;
+            old_key == key || unpack_generation(old) != generation || unpack_depth(old) <= depth
         };
         if replace {
-            entries[local_idx] = Some(TTEntry {
-                key,
-                depth,
-                score,
-                flag,
-                best_move,
-                generation,
-            });
+            let data = pack(depth, score, flag, best_move, generation);
+            s.data.store(data, Ordering::Relaxed);
+            s.check.store(key ^ data, Ordering::Relaxed);
         }
     }
 }
