@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.7.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-1.11.0-orange" alt="version">
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
   <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
@@ -23,7 +23,7 @@
 
 **Fructosita** is an original UCI chess engine written from scratch in **Rust**.
 
-Version **1.7.0** extends the search-focused 1.5.0 line with evaluation improvements introduced in the intermediate 1.6.0 step and additional search refinements in 1.7.0. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
+Version **1.11.0** extends the 1.7.0 line through four documented development steps: faster transposition-table and move-selection machinery, expanded handcrafted evaluation, additional pawn/king terms, and piece-square-table tuning by file and rank. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
 
 The project follows a simple principle:
 
@@ -37,42 +37,46 @@ Fructosita is developed by **Antonio Espinosa**, a *Químico Farmacobiólogo* (c
 
 The project began on July 2, 2026 as a personal challenge to learn from scratch how a chess engine works. The name **Fructosita** comes from the author's undergraduate thesis work involving fructose.
 
-## Fructosita 1.7.0
+## Fructosita 1.11.0
 
-### What's new since 1.5.0
+### What's new since 1.7.0
 
-The development path to 1.7.0 introduced:
+The historical development path supplied with this version records:
 
-- **King-zone attack evaluation**, rewarding coordinated pressure around the enemy king.
-- **Bishop-pair evaluation**.
-- **Rook bonuses on open and semi-open files**.
-- **History malus** for previously searched quiet moves that fail to produce a cutoff.
-- **Transposition-table probing in quiescence search**.
-- **SEE pruning of sufficiently losing captures**.
-- **TT-refined static evaluation** in the main search.
+- **1.8.0 — search/TT speed work:** lock-less transposition table, TT prefetch, searching the TT move before full move generation, and lazy move selection.
+- **1.9.0 — evaluation expansion:** endgame knowledge, safe per-piece mobility, threats, hanging pieces, knight outposts, and Texel tuning.
+- **1.10.0 — king and pawn evaluation:** king shield and pawn storm terms, plus blocked/free passed-pawn evaluation.
+- **1.11.0 — PST refinement:** piece-square tables tuned by file and rank.
 
-The earlier 1.5.0 search improvements remain part of this release, including logarithmic LMR, adaptive null-move pruning, aspiration windows, time-management iteration control, and transposition-table aging.
+These features are present in the supplied 1.11.0 source tree.
 
 ## Strength evidence
 
-The public CCRL-era **1.3.4** release is used here only as an informal reference of approximately **2500 Elo**.
-
-The historical release-preparation material supplied for 1.7.0 reports these parent-relative development results:
+Historical release-preparation material supplied with 1.11.0 reports the following **parent-relative, early-stopped SPRT estimates**:
 
 | Step | Main change | Reported result vs parent |
 |---|---|---:|
-| 1.4.0 | Time-management iteration guard | **+32.8 ± 23.4 Elo** |
-| 1.5.0 | Logarithmic LMR, adaptive null move, aspiration windows, TT aging | **+52.2 ± 32.6 Elo** |
-| 1.6.0 | King-zone attack evaluation, bishop pair, rook file bonuses | **+25.6 ± 19.5 Elo** |
-| 1.7.0 | History malus, qsearch TT probe, SEE pruning, TT-refined static eval | **+81.9 ± 36.8 Elo** |
+| 1.8.0 | Lock-less TT, prefetch, TT-first move handling, lazy move selection | **+45.9 ± 27.2 Elo** |
+| 1.9.0 | Expanded evaluation and Texel tuning | **+93.5 ± 41.9 Elo** |
+| 1.10.0 | King shield/storm and passed-pawn refinements | **+81.4 ± 37.0 Elo** |
+| 1.11.0 | File/rank PST tuning | **+91.7 ± 41.2 Elo** |
 
-The same historical material also reports a separate **1,400-game self-play comparison of 1.7.0 against the 1.3.4 code line**, measuring **+146.3 Elo** with a reported **95% confidence interval of +131.0 to +162.1 Elo**. The supplied publication bundle does not include the original match log or PGN, so this figure is preserved as a historically reported development result rather than independently re-audited match evidence.
+These figures **must not be added together** and are not an absolute rating measurement. No independent 1.11.0-vs-1.7.0 holdout result is included in the supplied 1.11.0 publication bundle, so this release does not assign a derived absolute Elo rating from these SPRTs.
 
-Using the informal ~2500 reference for 1.3.4 together with that direct self-play gap suggests a rough development ballpark around **2645–2650 Elo**. **This is not a CCRL rating and should not be presented as one.** Self-play gaps also do not necessarily transfer directly to independent rating lists.
+The CCRL-era 1.3.4 value of roughly **2500 Elo** remains only an informal historical reference and is not used here to claim a formal rating for 1.11.0.
+
+## Historical bench identity
+
+The supplied release-preparation notes identify this version with measured experiment **EXP-0023** and report the deterministic depth-10 bench as:
+
+- nodes: **482,000**
+- signature: **`b5c444e86376ebbe`**
+
+This value should be reproduced from the publication tree before the tag is pushed.
 
 ## Search
 
-Fructosita 1.7.0 includes:
+Fructosita 1.11.0 includes:
 
 - Principal Variation Search
 - Iterative deepening
@@ -84,29 +88,30 @@ Fructosita 1.7.0 includes:
 - Late-move pruning
 - Internal iterative reductions
 - Delta pruning in quiescence
-- Static Exchange Evaluation
-- SEE-based capture pruning
-- Killer heuristic
-- History heuristic and history malus
-- One-ply continuation history
-- Transposition-table aging
-- Transposition-table probing in quiescence
+- Static Exchange Evaluation and SEE-based capture pruning
+- Killer, history, history-malus and continuation-history heuristics
+- Lock-less transposition table with aging and prefetch
+- TT probing in quiescence
 - TT-refined static evaluation
+- TT move validation and search before full move generation
+- Lazy move selection
 
 ## Evaluation
 
-Fructosita 1.7.0 uses a handcrafted tapered evaluation including:
+Fructosita 1.11.0 uses a handcrafted tapered evaluation including:
 
 - Material
-- Piece-square tables
-- Per-rank corrections
-- Mobility
-- Pawn structure
-- Passed pawns
-- King safety
+- Piece-square tables with file/rank tuning
+- Mobility, including safe per-piece mobility
+- Pawn structure and passed pawns
+- Blocked/free passed-pawn terms
+- King safety, king shield and pawn storm
 - King-zone attack pressure
 - Bishop-pair bonus
 - Rook bonuses on open and semi-open files
+- Threats and hanging pieces
+- Knight outposts
+- Endgame-specific knowledge
 
 ## Engine
 

@@ -39,7 +39,7 @@ const CONT_HISTORY_SCALE: i32 = 20;
 const CONT_HISTORY_MAX: i16 = 16_384;
 // Build de MEDICIÓN: calcula la doble ordenación (con y sin cont-history) para
 // obtener `tier_change_pct` (puerta 2). Cuesta tiempo → OFF en el candidato.
-const MEASURE_TIER_CHANGES: bool = false;
+
 
 // ---------------------------------------------------------------------------
 // EXP-0005 (SEARCH-A) — LMR logarítmica.
@@ -55,6 +55,11 @@ const MEASURE_TIER_CHANGES: bool = false;
 // Resolviendo R = a + ln d · ln m / c con (a), (b): a ≈ 0,5, c ≈ 3,0.
 // ---------------------------------------------------------------------------
 const LMR_BASE: f64 = 0.5;
+
+// EXP-0013: con `false` todas las jugadas se puntúan ANTES de buscar la de la
+// TT (orden bit a bit igual al de EXP-0011: sirve para verificar el selector y
+// el validador). Con `true` solo se generan si la jugada de la TT no corta.
+const LAZY_GEN: bool = true;
 const LMR_DIVISOR: f64 = 3.0;
 
 fn lmr_table() -> &'static [[i32; 64]; 64] {
@@ -155,8 +160,32 @@ pub struct SearchLimits {
     pub hard_deadline: Instant,
 }
 
+/// EXP-0013: contadores del hilo, sin atómicos en el camino caliente. Se
+/// vuelcan a `SearchStats` cada 2.048 nodos y al terminar.
+#[derive(Default)]
+struct LocalStats {
+    nodes: u64,
+    qnodes: u64,
+    tt_probes: u64,
+    tt_hits: u64,
+    tt_cutoffs: u64,
+    beta_cutoffs: u64,
+    beta_cutoffs_first_move: u64,
+    null_move_attempts: u64,
+    null_move_cutoffs: u64,
+    lmr_attempts: u64,
+    lmr_researches: u64,
+    pvs_researches: u64,
+    lmp_prunes: u64,
+    lmp_prunes_futility_silent: u64,
+    lmp_prunes_beyond_lmr: u64,
+}
+
 struct SearchContext<'a> {
     stats: &'a SearchStats,
+    ls: LocalStats,
+    /// Nodos de este hilo (no se reinicia al volcar): marca el chequeo de tiempo.
+    ticks: u64,
     seldepth: u8,
     stop: &'a AtomicBool,
     hard_deadline: Instant,
@@ -255,15 +284,32 @@ impl<'a> SearchContext<'a> {
         self.cont_history[pp.index()][pt as usize][piece.index()][to as usize] as i32
     }
 
+    fn flush_stats(&mut self) {
+        let l = std::mem::take(&mut self.ls);
+        let st = self.stats;
+        st.nodes.fetch_add(l.nodes, Ordering::Relaxed);
+        st.qnodes.fetch_add(l.qnodes, Ordering::Relaxed);
+        st.tt_probes.fetch_add(l.tt_probes, Ordering::Relaxed);
+        st.tt_hits.fetch_add(l.tt_hits, Ordering::Relaxed);
+        st.tt_cutoffs.fetch_add(l.tt_cutoffs, Ordering::Relaxed);
+        st.beta_cutoffs.fetch_add(l.beta_cutoffs, Ordering::Relaxed);
+        st.beta_cutoffs_first_move.fetch_add(l.beta_cutoffs_first_move, Ordering::Relaxed);
+        st.null_move_attempts.fetch_add(l.null_move_attempts, Ordering::Relaxed);
+        st.null_move_cutoffs.fetch_add(l.null_move_cutoffs, Ordering::Relaxed);
+        st.lmr_attempts.fetch_add(l.lmr_attempts, Ordering::Relaxed);
+        st.lmr_researches.fetch_add(l.lmr_researches, Ordering::Relaxed);
+        st.pvs_researches.fetch_add(l.pvs_researches, Ordering::Relaxed);
+        st.lmp_prunes.fetch_add(l.lmp_prunes, Ordering::Relaxed);
+        st.lmp_prunes_futility_silent.fetch_add(l.lmp_prunes_futility_silent, Ordering::Relaxed);
+        st.lmp_prunes_beyond_lmr.fetch_add(l.lmp_prunes_beyond_lmr, Ordering::Relaxed);
+    }
+
     fn check_time(&mut self) {
-        if self
-            .stats
-            .nodes
-            .load(Ordering::Relaxed)
-            .is_multiple_of(2048)
-            && (self.stop.load(Ordering::Relaxed) || Instant::now() >= self.hard_deadline)
-        {
-            self.stopped = true;
+        if self.ticks.is_multiple_of(2048) {
+            self.flush_stats();
+            if self.stop.load(Ordering::Relaxed) || Instant::now() >= self.hard_deadline {
+                self.stopped = true;
+            }
         }
     }
 }
@@ -380,6 +426,40 @@ fn move_score(
     }
 }
 
+/// EXP-0013: quita de la lista la jugada que ya se buscó primero (la de la
+/// TT) y puntúa el resto con `move_score`.
+fn score_moves(
+    moves: &mut Vec<Move>,
+    exclude: Option<Move>,
+    board: &Board,
+    tt_move: Option<Move>,
+    ply: usize,
+    ctx: &SearchContext,
+) -> Vec<i32> {
+    if let Some(x) = exclude {
+        moves.retain(|&m| m != x);
+    }
+    moves.iter().map(|m| move_score(m, board, tt_move, ply, ctx)).collect()
+}
+
+/// EXP-0013: selección perezosa. Devuelve el índice de mayor puntuación (el
+/// primero en caso de empate, igual que la ordenación estable anterior) y lo
+/// marca como usado. `i32::MIN` nunca es una puntuación real.
+fn pick_best(scores: &mut [i32]) -> Option<usize> {
+    let mut best = None;
+    let mut best_score = i32::MIN;
+    for (j, &sc) in scores.iter().enumerate() {
+        if sc > best_score {
+            best_score = sc;
+            best = Some(j);
+        }
+    }
+    if let Some(j) = best {
+        scores[j] = i32::MIN;
+    }
+    best
+}
+
 /// Filtra y ordena las capturas candidatas de quiescence usando SEE: las
 /// capturas que pierden material (SEE < 0) se descartan directamente (poda
 /// estándar de quiescence), y las que quedan se ordenan de más a menos
@@ -429,8 +509,8 @@ fn quiescence(
     if ctx.stopped {
         return 0;
     }
-    ctx.stats.qnodes.fetch_add(1, Ordering::Relaxed);
-    ctx.stats.nodes.fetch_add(1, Ordering::Relaxed);
+    ctx.ls.qnodes += 1;
+    { ctx.ls.nodes += 1; ctx.ticks += 1 };
     if ply as u8 > ctx.seldepth {
         ctx.seldepth = ply as u8;
     }
@@ -569,16 +649,16 @@ fn negamax(
         return quiescence(board, alpha, beta, ply, ctx);
     }
 
-    ctx.stats.nodes.fetch_add(1, Ordering::Relaxed);
+    { ctx.ls.nodes += 1; ctx.ticks += 1 };
     if ply as u8 > ctx.seldepth {
         ctx.seldepth = ply as u8;
     }
 
-    ctx.stats.tt_probes.fetch_add(1, Ordering::Relaxed);
+    ctx.ls.tt_probes += 1;
     let tt_probe = ctx.tt.probe(board.hash);
     let mut tt_move = None;
     if let Some(entry) = &tt_probe {
-        ctx.stats.tt_hits.fetch_add(1, Ordering::Relaxed);
+        ctx.ls.tt_hits += 1;
         tt_move = entry.best_move;
         if entry.depth as i32 >= depth && ply > 0 {
             let score = score_from_tt(entry.score, ply);
@@ -588,7 +668,7 @@ fn negamax(
                 TTFlag::UpperBound => score <= alpha,
             };
             if usable {
-                ctx.stats.tt_cutoffs.fetch_add(1, Ordering::Relaxed);
+                ctx.ls.tt_cutoffs += 1;
                 return score;
             }
         }
@@ -694,9 +774,10 @@ fn negamax(
         && beta.abs() < MATE_SCORE - MAX_PLY as i32
         && has_non_pawn_material(board, board.side_to_move)
     {
-        ctx.stats.null_move_attempts.fetch_add(1, Ordering::Relaxed);
+        ctx.ls.null_move_attempts += 1;
         let null_r = 3 + depth / 4 + ((static_eval - beta) / 200).min(2);
         let null_board = board.make_null_move();
+        ctx.tt.prefetch(null_board.hash);
         ctx.game_history.push(null_board.hash);
         let mut child_pv = Vec::new();
         let score = -negamax(
@@ -713,98 +794,40 @@ fn negamax(
             return 0;
         }
         if score >= beta {
-            ctx.stats.null_move_cutoffs.fetch_add(1, Ordering::Relaxed);
+            ctx.ls.null_move_cutoffs += 1;
             return if score >= MATE_SCORE - MAX_PLY as i32 { beta } else { score };
         }
     }
 
-    let mut moves = generate_legal_moves(board);
-    if moves.is_empty() {
-        return if in_check {
-            -MATE_SCORE + ply as i32
-        } else {
-            0
-        };
-    }
-    // === MEDICIÓN (puerta 2, investigación 10): tier_change_pct ===
-    // Se calculan las DOS ordenaciones (con y sin continuation history) y se
-    // clasifica cada silenciosa en T0 (completa) / T1 (LMR) / T2 (LMP) bajo cada
-    // una. Solo en build de medición: el candidato no paga este coste.
-    if MEASURE_TIER_CHANGES && depth >= 3 {
-        // Literales espejo de LMP_BASE/LMP_C/LMP_IMPROVING_BONUS (declaradas más
-        // abajo en la función). Solo código de medición.
-        let lmp_c = 3 + depth * depth - if improving { 0 } else { 1 };
-        let mut with_ch: Vec<(i32, Move)> = moves
-            .iter()
-            .map(|m| (move_score(m, board, tt_move, ply, ctx), *m))
-            .collect();
-        let mut no_ch: Vec<(i32, Move)> = moves
-            .iter()
-            .map(|m| {
-                let base = if m.is_capture() || m.promotion().is_some() {
-                    move_score(m, board, tt_move, ply, ctx)
-                } else if ctx.killers[ply][0] == Some(*m) || ctx.killers[ply][1] == Some(*m) {
-                    move_score(m, board, tt_move, ply, ctx)
-                } else {
-                    ctx.history_heuristic[board.side_to_move.index()][m.from as usize]
-                        [m.to as usize]
-                };
-                (base, *m)
-            })
-            .collect();
-        with_ch.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
-        no_ch.sort_by_key(|(sc, _)| std::cmp::Reverse(*sc));
-        let tier_of = |list: &Vec<(i32, Move)>, target: &Move| -> Option<u8> {
-            let mut q = 0i32;
-            for (i, (_, m)) in list.iter().enumerate() {
-                let is_q = !m.is_capture() && m.promotion().is_none();
-                if m == target {
-                    if !is_q {
-                        return None;
-                    }
-                    return Some(if q >= lmp_c {
-                        2
-                    } else if i >= 4 {
-                        1
-                    } else {
-                        0
-                    });
-                }
-                if is_q {
-                    q += 1;
-                }
-            }
-            None
-        };
-        for mv in moves.iter() {
-            if mv.is_capture() || mv.promotion().is_some() {
-                continue;
-            }
-            // Diagnóstico de escala: magnitud típica de cada historial.
-            if let Some(pc) = board.mailbox[mv.from as usize] {
-                let hv = ctx.history_heuristic[board.side_to_move.index()][mv.from as usize]
-                    [mv.to as usize];
-                let cv = ctx.cont_history_score(ply, pc.kind, mv.to);
-                ctx.stats
-                    .ch_quiets_scored
-                    .fetch_add(hv as u64, Ordering::Relaxed);
-                ctx.stats
-                    .ch_nonzero_entries
-                    .fetch_add(cv as u64, Ordering::Relaxed);
-            }
-            if let (Some(a), Some(b)) = (tier_of(&with_ch, mv), tier_of(&no_ch, mv)) {
-                ctx.stats.ch_quiets_classified.fetch_add(1, Ordering::Relaxed);
-                if a != b {
-                    ctx.stats.ch_tier_changes.fetch_add(1, Ordering::Relaxed);
-                }
-            }
+    // EXP-0013 (SPEED-A): la jugada de la TT se busca ANTES de generar y
+    // ordenar el resto. En la mayoría de nodos de corte es la que corta, así
+    // que la generación, el SEE de cada captura y la ordenación se ahorran.
+    // Se valida (pseudo-legal + no deja el rey en jaque) porque una colisión de
+    // hash puede traer una jugada de otra posición. El resto se elige por
+    // selección perezosa (máximo con desempate por orden de generación): el
+    // mismo orden que la ordenación estable anterior, sin ordenar la lista.
+    let us = board.side_to_move;
+    let tt_first = tt_move.filter(|&m| {
+        crate::movegen::is_pseudo_legal(board, m) && !board.make_move(m).in_check(us)
+    });
+    let mut moves: Vec<Move> = Vec::new();
+    let mut scores: Vec<i32> = Vec::new();
+    let mut generated = false;
+    if !LAZY_GEN || tt_first.is_none() {
+        moves = generate_legal_moves(board);
+        if moves.is_empty() {
+            return if in_check {
+                -MATE_SCORE + ply as i32
+            } else {
+                0
+            };
         }
+        scores = score_moves(&mut moves, tt_first, board, tt_move, ply, ctx);
+        generated = true;
     }
-
-    moves.sort_by_cached_key(|mv| std::cmp::Reverse(move_score(mv, board, tt_move, ply, ctx)));
 
     let mut best_score = -INFINITY;
-    let mut best_move = moves[0];
+    let mut best_move: Option<Move> = None;
     let alpha_orig = alpha;
 
     // Futility pruning (frontier / extended): poda por el lado de ALPHA, el
@@ -843,8 +866,25 @@ fn negamax(
     // SEARCH-B: silenciosas realmente buscadas en este nodo (para el malus).
     let mut quiets_tried: Vec<Move> = Vec::new();
 
-    for (i, &mv) in moves.iter().enumerate() {
+    let mut next_index = 0usize;
+    loop {
+        let mv = if next_index == 0 && tt_first.is_some() {
+            tt_first.unwrap()
+        } else {
+            if !generated {
+                moves = generate_legal_moves(board);
+                scores = score_moves(&mut moves, tt_first, board, tt_move, ply, ctx);
+                generated = true;
+            }
+            match pick_best(&mut scores) {
+                Some(j) => moves[j],
+                None => break,
+            }
+        };
+        let i = next_index;
+        next_index += 1;
         let next = board.make_move(mv);
+        ctx.tt.prefetch(next.hash);
         let is_quiet = !mv.is_capture() && mv.promotion().is_none();
 
         // SEARCH-B: poda SEE de capturas perdedoras cerca de las hojas. En
@@ -898,18 +938,14 @@ fn negamax(
             && quiets_searched >= lmp_count
             && !next.in_check(next.side_to_move)
         {
-            ctx.stats.lmp_prunes.fetch_add(1, Ordering::Relaxed);
+            ctx.ls.lmp_prunes += 1;
             let f_margin = FUTILITY_BASE + FUTILITY_STEP * depth
                 - if improving { 0 } else { FUTILITY_IMPROVING_BONUS };
             if depth > FUTILITY_MAX_DEPTH || static_eval + f_margin > alpha {
-                ctx.stats
-                    .lmp_prunes_futility_silent
-                    .fetch_add(1, Ordering::Relaxed);
+                ctx.ls.lmp_prunes_futility_silent += 1;
             }
             if depth >= 3 && i >= 4 {
-                ctx.stats
-                    .lmp_prunes_beyond_lmr
-                    .fetch_add(1, Ordering::Relaxed);
+                ctx.ls.lmp_prunes_beyond_lmr += 1;
             }
             continue;
         }
@@ -942,7 +978,7 @@ fn negamax(
                 && !in_check
                 && !next.in_check(next.side_to_move)
             {
-                ctx.stats.lmr_attempts.fetch_add(1, Ordering::Relaxed);
+                ctx.ls.lmr_attempts += 1;
                 let mut r = lmr_table()[(depth as usize).min(63)][i.min(63)];
                 if !improving {
                     r += 1;
@@ -967,7 +1003,7 @@ fn negamax(
                 ctx,
             );
             if !ctx.stopped && s > alpha && reduction > 0 {
-                ctx.stats.lmr_researches.fetch_add(1, Ordering::Relaxed);
+                ctx.ls.lmr_researches += 1;
                 s = -negamax(
                     &next,
                     iir_depth - 1,
@@ -979,7 +1015,7 @@ fn negamax(
                 );
             }
             if !ctx.stopped && s > alpha && s < beta {
-                ctx.stats.pvs_researches.fetch_add(1, Ordering::Relaxed);
+                ctx.ls.pvs_researches += 1;
                 s = -negamax(&next, iir_depth - 1, -beta, -alpha, ply + 1, &mut child_pv, ctx);
             }
             s
@@ -993,7 +1029,7 @@ fn negamax(
 
         if score > best_score {
             best_score = score;
-            best_move = mv;
+            best_move = Some(mv);
             pv.clear();
             pv.push(mv);
             pv.extend(child_pv);
@@ -1002,11 +1038,9 @@ fn negamax(
             alpha = best_score;
         }
         if alpha >= beta {
-            ctx.stats.beta_cutoffs.fetch_add(1, Ordering::Relaxed);
+            ctx.ls.beta_cutoffs += 1;
             if i == 0 {
-                ctx.stats
-                    .beta_cutoffs_first_move
-                    .fetch_add(1, Ordering::Relaxed);
+                ctx.ls.beta_cutoffs_first_move += 1;
             }
             if !mv.is_capture() {
                 ctx.store_killer(ply, mv);
@@ -1040,7 +1074,7 @@ fn negamax(
         iir_depth,
         score_to_tt(best_score, ply),
         flag,
-        Some(best_move),
+        best_move,
     );
 
     best_score
@@ -1106,6 +1140,8 @@ fn iterative_deepening_one_thread(
 
     let mut ctx = SearchContext {
         stats,
+        ls: LocalStats::default(),
+        ticks: 0,
         seldepth: 0,
         stop,
         hard_deadline: limits.hard_deadline,
@@ -1171,6 +1207,7 @@ fn iterative_deepening_one_thread(
                 best_score = score;
             }
             last_completed_depth = depth;
+            ctx.flush_stats();
             if ctx.is_main {
                 print_info(
                     depth,
@@ -1192,6 +1229,7 @@ fn iterative_deepening_one_thread(
         depth += 1;
     }
 
+    ctx.flush_stats();
     ThreadResult {
         depth: last_completed_depth,
         score: best_score,

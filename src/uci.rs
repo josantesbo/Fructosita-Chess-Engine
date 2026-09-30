@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_NAME: &str = "Fructosita 1.7.0";
+pub const ENGINE_NAME: &str = "Fructosita 1.11.0";
 pub const ENGINE_AUTHOR: &str = "Antonio Espinosa";
 const DEFAULT_HASH_MB: usize = 64;
 const DEFAULT_THREADS: usize = 1;

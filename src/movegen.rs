@@ -464,6 +464,94 @@ impl LegalityContext {
     }
 }
 
+/// EXP-0013: ¿es `mv` pseudo-legal en `board`, exactamente con el mismo tipo
+/// que le daría el generador? Sirve para validar la jugada de la TT antes de
+/// buscarla sin generar la lista. Los enroques devuelven `false` (se dejan al
+/// camino normal, que los genera y valida). La legalidad respecto al jaque se
+/// comprueba aparte, con `make_move` + `in_check`.
+pub fn is_pseudo_legal(board: &Board, mv: Move) -> bool {
+    let us = board.side_to_move;
+    let Some(piece) = board.mailbox[mv.from as usize] else {
+        return false;
+    };
+    if piece.color != us || mv.from == mv.to {
+        return false;
+    }
+    let target = board.mailbox[mv.to as usize];
+    if let Some(t) = target {
+        if t.color == us || t.kind == PieceType::King {
+            return false;
+        }
+    }
+    let t = tables();
+    let occ = board.occupancy();
+    let to_bb = set_bit(EMPTY, mv.to);
+    let (push, start_rank, promo_rank): (i32, u8, u8) =
+        if us == Color::White { (8, 1, 7) } else { (-8, 6, 0) };
+    let is_pawn = piece.kind == PieceType::Pawn;
+    let single = mv.from as i32 + push;
+    let piece_attacks = || match piece.kind {
+        PieceType::Knight => t.knight_attacks(mv.from),
+        PieceType::Bishop => t.bishop_attacks(mv.from, occ),
+        PieceType::Rook => t.rook_attacks(mv.from, occ),
+        PieceType::Queen => t.queen_attacks(mv.from, occ),
+        PieceType::King => t.king_attacks(mv.from),
+        PieceType::Pawn => EMPTY,
+    };
+    match mv.kind {
+        MoveKind::Quiet => {
+            if target.is_some() {
+                return false;
+            }
+            if is_pawn {
+                mv.to as i32 == single && rank_of(mv.to) != promo_rank
+            } else {
+                piece_attacks() & to_bb != EMPTY
+            }
+        }
+        MoveKind::DoublePawnPush => {
+            is_pawn
+                && rank_of(mv.from) == start_rank
+                && mv.to as i32 == mv.from as i32 + 2 * push
+                && target.is_none()
+                && board.mailbox[single as usize].is_none()
+        }
+        MoveKind::Capture => {
+            if target.is_none() {
+                return false;
+            }
+            if is_pawn {
+                t.pawn_attacks(us, mv.from) & to_bb != EMPTY && rank_of(mv.to) != promo_rank
+            } else {
+                piece_attacks() & to_bb != EMPTY
+            }
+        }
+        MoveKind::EnPassantCapture => {
+            is_pawn
+                && board.en_passant == Some(mv.to)
+                && target.is_none()
+                && t.pawn_attacks(us, mv.from) & to_bb != EMPTY
+        }
+        MoveKind::CastleKingside | MoveKind::CastleQueenside => false,
+        MoveKind::Promotion(p) => {
+            is_pawn
+                && p != PieceType::Pawn
+                && p != PieceType::King
+                && target.is_none()
+                && mv.to as i32 == single
+                && rank_of(mv.to) == promo_rank
+        }
+        MoveKind::PromotionCapture(p) => {
+            is_pawn
+                && p != PieceType::Pawn
+                && p != PieceType::King
+                && target.is_some()
+                && rank_of(mv.to) == promo_rank
+                && t.pawn_attacks(us, mv.from) & to_bb != EMPTY
+        }
+    }
+}
+
 /// Busca, entre los movimientos legales, el que corresponde a la notación
 /// UCI dada (p. ej. "e2e4", "e7e8q"). Útil para procesar `position ... moves ...`.
 pub fn find_move(board: &Board, uci_str: &str) -> Option<Move> {
@@ -501,5 +589,41 @@ mod tests {
         let b = Board::from_fen("4k3/8/8/r1pPK3/8/8/8/8 w - c6 0 1").unwrap();
         let legal = generate_legal_moves(&b);
         assert!(legal.iter().all(|mv| mv.kind != MoveKind::EnPassantCapture));
+    }
+}
+
+#[cfg(test)]
+mod pseudo_legal_tests {
+    use super::*;
+
+    /// Para cada posición: toda jugada legal es pseudo-legal según el
+    /// validador, y ninguna jugada legal de OTRA posición que no sea
+    /// pseudo-legal aquí pasa el filtro (se contrasta con la lista generada).
+    #[test]
+    fn validator_matches_generator() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "rnbqkbnr/ppp1p1pp/8/3pPp2/8/8/PPPP1PPP/RNBQKBNR w KQkq f6 0 3",
+        ];
+        let boards: Vec<Board> = fens.iter().map(|f| Board::from_fen(f).unwrap()).collect();
+        for b in &boards {
+            let legal = generate_legal_moves(b);
+            for &mv in &legal {
+                if !mv.is_castle() {
+                    assert!(is_pseudo_legal(b, mv), "legal no aceptada: {mv} en {}", b.to_fen());
+                }
+            }
+            for other in &boards {
+                for mv in generate_legal_moves(other) {
+                    if is_pseudo_legal(b, mv) && !b.make_move(mv).in_check(b.side_to_move) {
+                        assert!(legal.contains(&mv), "aceptada no legal: {mv} en {}", b.to_fen());
+                    }
+                }
+            }
+        }
     }
 }
