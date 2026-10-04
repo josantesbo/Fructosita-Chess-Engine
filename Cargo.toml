@@ -1,6 +1,6 @@
 [package]
 name = "fructosita"
-version = "1.11.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Antonio Espinosa"]
 description = "Fructosita - motor de ajedrez UCI original, desarrollado desde cero en Rust."

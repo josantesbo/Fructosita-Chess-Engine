@@ -2,6 +2,18 @@
 
 This changelog records the public history of Fructosita up to the version represented by this tag.
 
+## 2.0.0 — First major release (2026)
+
+- First release validated on a sealed holdout prepared before experimentation.
+- Direct result vs 1.7.0: **+239.2 ± 23.0 Elo** across **1,000 games at 10+0.1**.
+- Reliability in that holdout: **0 crashes, 0 illegal moves, 0 time forfeits**.
+- Historical release notes report approximately **+30% nodes per second** and **−52% time to depth 12** vs 1.7.0.
+- Added per-thread evaluation cache.
+- Added per-square PST corrections on top of the file/rank tuning line.
+- Added Razoring and ProbCut.
+- Added panic-time behavior after a sufficiently large iteration-to-iteration score drop.
+- UCI robustness additions include `go nodes`, `go infinite` / `go ponder` stop handling, `ponderhit`, and `Clear Hash`.
+
 ## 1.11.0 — Piece-square-table refinement (2026)
 
 - Piece-square-table tuning by file and rank.
@@ -31,7 +43,7 @@ This changelog records the public history of Fructosita up to the version repres
 - Lazy move selection.
 - Reported parent-relative early-stopped SPRT: **+45.9 ± 27.2 Elo**.
 
-The 1.8.0–1.11.0 parent-relative SPRT values are development estimates and must not be treated as additive or as a direct absolute rating measurement.
+The 1.8.0–1.11.0 parent-relative SPRT values are development estimates and must not be treated as additive. The 2.0.0-vs-1.7.0 result above is a separate direct sealed-holdout comparison.
 
 ## 1.7.0 — Search and king-attack improvements (2026)
 

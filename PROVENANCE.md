@@ -1,46 +1,54 @@
-# v1.11.0 publication provenance
+# v2.0.0 publication provenance
 
-This tag preserves the Fructosita 1.11.0 engine implementation supplied in the historical release bundle while adding publication documentation and correcting canonical repository metadata.
+This tag preserves the Fructosita 2.0.0 engine implementation supplied in the historical release bundle while adding publication documentation and correcting canonical repository metadata.
 
 ## Historical artifacts supplied for publication
 
-- Outer historical bundle `v1.11.0.zip` SHA-256: `b59876bf9dfec1dde074ef266e91f92a44029ed03d434de90e0d3ad14ee09579`
-- Windows x86_64 binary SHA-256: `6221ca2c9e96dd9ca0c3bb776014754e118c6c09c5a5107dc966d8050d19c2fe`
-- Original supplied v1.11.0 source archive SHA-256: `e9a2783ec258d3df10590d2c1cad7552c159945b4699678afbdd376415c0f68f`
+- Outer historical bundle `v2.0.0.zip` SHA-256: `5cb8c407a17aa56b992dab0fa1bf81a82e06da4ebeb5242e365fa798ff1c5ea4`
+- Historical Windows x86_64 binary SHA-256: `3927506d0b958d6ef1aab790020e57fc64013e06330216121f533863e262ed0c`
+- Original supplied v2.0.0 source archive SHA-256: `b5945fc66732ea6bc7230fd02d29973dd85e6306f87cfaa2bfd2149b580f1144`
 
 The original source archive contains the actual Rust source tree (`src/`), `testdata/`, `Cargo.toml`, `Cargo.lock`, `.gitignore`, and the GPL license.
 
 ## Chronological scope
 
-Publication documentation for this tag is intentionally limited to information available up to **Fructosita 1.11.0**. No later Fructosita version, later experiment, or later result is intentionally referenced.
+Publication documentation for this tag is intentionally limited to information available up to **Fructosita 2.0.0**. No later Fructosita version, later experiment, or later result is intentionally referenced.
 
-The supplied historical `RELEASE_NOTES.md` contained explicit information about a later release and later validation result. Those forward references were intentionally excluded from the 1.11.0 publication documentation to preserve chronological integrity.
-
-A review of the supplied 1.11.0 source tree found no explicit references to later numbered Fructosita versions. Historical technical comments in the source were therefore preserved rather than rewritten merely for style.
+No explicit references to numbered Fructosita versions later than 2.0.0 were found in the supplied Rust source tree. Historical technical comments in the source are preserved rather than rewritten merely for style.
 
 ## Publication-only changes
 
-The engine implementation under `src/`, `Cargo.lock`, `testdata/`, and the GPL license text are preserved from the supplied v1.11.0 source archive.
+The engine implementation under `src/`, `Cargo.lock`, `testdata/`, and the GPL license text is preserved from the supplied v2.0.0 source archive.
 
 For publication in the canonical repository:
 
 - `Cargo.toml` repository metadata is changed from `jordiqui/Fructosita-Chess-Engine` to `josantesbo/Fructosita-Chess-Engine`;
 - README, changelog, security, contribution, provenance, and ignore files are added or updated for publication;
-- the existing project artwork under `assets/` is intended to be preserved from the canonical repository during the controlled copy step.
+- existing project artwork under `assets/` and repository automation under `.github/` are intended to be preserved from the canonical repository during the controlled copy step.
 
 No engine logic is intentionally changed by these publication edits.
 
-## Strength-note provenance
+## Strength provenance
 
-The supplied historical `RELEASE_NOTES.md` reports these parent-relative, early-stopped SPRT estimates:
+The supplied historical `RELEASE_NOTES.md` reports a direct **2.0.0 vs 1.7.0** sealed-holdout result of **+239.2 ± 23.0 Elo** over **1,000 games at 10+0.1**, with **0 crashes, 0 illegal moves, and 0 time forfeits**.
 
-- 1.8.0 vs parent: **+45.9 ± 27.2 Elo**;
-- 1.9.0 vs parent: **+93.5 ± 41.9 Elo**;
-- 1.10.0 vs parent: **+81.4 ± 37.0 Elo**;
-- 1.11.0 vs parent: **+91.7 ± 41.2 Elo**.
+The same notes report approximately **+30% nodes per second** and **−52% time to depth 12** relative to 1.7.0.
 
-The same historical notes explicitly warn that these estimates must not be added together. The supplied 1.11.0 bundle does not provide an independent direct holdout result for the complete 1.7.0→1.11.0 chain, so no derived absolute Elo rating is asserted for 1.11.0.
+Using the previously documented informal 1.7.0 ballpark of roughly 2645–2650 Elo gives an informal 2.0.0 development ballpark of roughly **2884–2889 Elo**. This derived figure is not a CCRL rating and is not presented as an independently measured absolute rating.
 
-## Historical bench provenance
+## Source-change provenance vs 1.11.0
 
-The supplied release-preparation notes state that 1.11.0 was built from measured experiment **EXP-0023** with only the version string changed and report a deterministic depth-10 bench of **482,000 nodes** with signature **`b5c444e86376ebbe`**. This should be reproduced from the publication tree before release.
+A source-tree comparison against the published 1.11.0 snapshot shows substantive changes in:
+
+- `src/commands.rs`
+- `src/eval.rs`
+- `src/movegen.rs`
+- `src/search.rs`
+- `src/texel.rs`
+- `src/uci.rs`
+
+The supplied 2.0.0 source contains the release-note features including per-thread evaluation caching, per-square PST correction, Razoring, ProbCut, panic-time logic, `go nodes`, `ponderhit`, `Clear Hash`, and stronger handling for `go infinite` / `go ponder`.
+
+## Bench note
+
+The supplied 2.0.0 release notes do not provide a frozen deterministic bench node count or signature. A local publication validation should therefore record the bench output produced by the Git-ready tree, but it should not be described as matching a historical bench identity unless separate evidence is supplied.

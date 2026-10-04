@@ -36,10 +36,12 @@ macro_rules! eval_params {
             /// EVAL-F: corrección de PST por columna y fila:
             /// [fase (mg, eg)][pieza][0..8 columna, 8..16 fila relativa].
             pub pst_fr: [[[i32; 16]; 6]; 2],
+            /// EVAL-H: corrección de PST casilla a casilla: [fase][pieza][casilla relativa].
+            pub pst_sq: [[[i32; 64]; 6]; 2],
         }
         impl Default for EvalParams {
             fn default() -> Self {
-                EvalParams { $($name: $val,)* pst_fr: PST_FR_DEFAULT }
+                EvalParams { $($name: $val,)* pst_fr: PST_FR_DEFAULT, pst_sq: PST_SQ_DEFAULT }
             }
         }
         pub const PARAM_NAMES: &[&str] = &[$(stringify!($name),)*];
@@ -53,6 +55,10 @@ macro_rules! eval_params {
                     PARAM_NAMES[i].to_string()
                 } else {
                     let j = i - PARAM_NAMES.len();
+                    if j >= 192 {
+                        let q = j - 192;
+                        return format!("pst_sq[{}][{}][{}]", if q / 384 == 0 { "mg" } else { "eg" }, (q / 64) % 6, q % 64);
+                    }
                     let (ph, pc, k) = (j / 96, (j / 16) % 6, j % 16);
                     format!("pst_fr[{}][{}][{}{}]", if ph == 0 { "mg" } else { "eg" }, pc,
                         if k < 8 { "file" } else { "rank" }, k % 8)
@@ -61,12 +67,16 @@ macro_rules! eval_params {
             pub fn to_vec(&self) -> Vec<i32> {
                 let mut v = vec![$(self.$name,)*];
                 for ph in &self.pst_fr { for pc in ph { v.extend_from_slice(pc); } }
+                for ph in &self.pst_sq { for pc in ph { v.extend_from_slice(pc); } }
                 v
             }
             pub fn from_vec(v: &[i32]) -> Self {
                 let mut it = v.iter();
-                let mut e = EvalParams { $($name: *it.next().expect("vector de pesos corto"),)* pst_fr: [[[0; 16]; 6]; 2] };
+                let mut e = EvalParams { $($name: *it.next().expect("vector de pesos corto"),)* pst_fr: [[[0; 16]; 6]; 2], pst_sq: [[[0; 64]; 6]; 2] };
                 for ph in e.pst_fr.iter_mut() { for pc in ph.iter_mut() { for x in pc.iter_mut() {
+                    *x = *it.next().expect("vector de pesos corto");
+                } } }
+                for ph in e.pst_sq.iter_mut() { for pc in ph.iter_mut() { for x in pc.iter_mut() {
                     *x = *it.next().expect("vector de pesos corto");
                 } } }
                 e
@@ -74,6 +84,26 @@ macro_rules! eval_params {
         }
     };
 }
+
+/// EVAL-H: valores afinados de la corrección de PST casilla a casilla.
+pub const PST_SQ_DEFAULT: [[[i32; 64]; 6]; 2] = [
+    [
+        [0, 0, 0, 0, 0, 0, 0, 0, -8, 4, -4, -12, -12, 12, 12, 0, 0, -4, 4, 0, 8, -20, 12, 4, 4, -8, 0, 4, 8, 0, -24, 0, 12, 12, 8, 4, 4, -12, -16, -4, -4, -28, -4, -20, 4, 24, -8, 4, 20, 48, -24, 48, -40, 96, -112, -92, 0, 0, 0, 0, 0, 0, 0, 0],
+        [-52, 4, -40, -16, -8, -4, 0, 16, 4, -40, 0, 0, 4, 4, -20, 12, 4, -12, 4, -8, -20, 0, 20, -8, 8, -16, -8, 0, 4, 4, 4, 8, 28, 16, -16, 8, 8, 12, -24, 32, -16, 12, -20, -16, -4, 40, 28, -16, -32, -60, 40, -20, 24, 8, -12, 16, -56, -40, 92, 16, 112, -48, 32, -8],
+        [12, 4, 0, 24, 12, 4, -64, -8, 16, 4, -4, 0, 0, 20, 12, 4, 4, -4, 0, -4, 4, 20, 12, 8, 8, 20, 8, -8, 16, -8, 8, 24, -16, 8, 0, 32, 0, 4, -4, -20, -4, 8, -12, -8, -8, 24, -20, 16, 24, 0, -24, -28, -16, 64, -8, -16, 28, -4, -20, -36, -4, -16, -56, 84],
+        [0, 0, -4, 4, 0, 4, -4, 0, -4, 12, 0, -4, 8, 16, 44, -28, -12, 0, 0, -8, -4, -8, 44, -8, -12, -16, -12, 8, 8, -28, 52, -8, -20, -20, -4, 12, 16, -12, 36, -16, -24, -16, -12, -16, -24, 0, 96, -20, -12, -8, -4, 8, -12, -8, -44, 4, -4, -8, -40, 12, 8, 8, -20, -28],
+        [-12, 8, 0, 4, -12, 12, 12, -76, -32, -20, 4, -4, 8, 12, 0, 32, 4, 8, 0, 0, -12, 4, 16, 12, 4, -8, 0, -8, 36, -8, 0, -32, 0, 8, -20, 8, -4, 20, -32, -8, 12, -24, 0, -60, -20, 20, -4, 28, 8, -16, 12, 8, -28, 8, 4, 80, -28, -16, -40, 12, 32, 36, 20, 8],
+        [-20, 0, -4, -16, 4, -12, 0, 0, 20, 0, 8, -4, -20, 16, 0, 12, 8, 12, -4, 24, -8, 16, 8, -16, 12, 56, 24, 8, -24, 20, 4, -40, 32, 16, 12, 44, 4, 16, -28, -24, 28, -44, 20, -20, -20, 80, 36, -12, 84, 32, 20, 24, 44, 24, 0, -100, -100, 48, 52, 32, 0, 8, 32, 24],
+    ],
+    [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, -8, 8, 12, 12, 4, -4, -12, -8, 0, 0, 16, 8, 4, -4, -4, 0, 8, -4, 0, -4, -4, 4, 0, 4, 0, -4, -4, -8, -8, 8, 4, 12, 16, 8, -12, -32, -24, 4, 8, 12, 16, -16, -40, 16, -64, 36, 44, 0, 0, 0, 0, 0, 0, 0, 0],
+        [12, -8, 24, 16, -4, 8, -4, -16, -12, 4, 8, -8, 4, 0, -8, -8, 8, 4, 0, 4, 8, -4, -12, 16, -12, -8, -4, 0, -4, 4, 20, 0, -4, 0, -4, -4, -4, -8, 8, -4, 4, -8, 12, 4, -12, -8, -8, -12, 0, 20, -12, 20, -12, -4, 0, -28, 4, 4, 0, -16, 20, 0, -24, -64],
+        [-8, 0, -8, 0, -8, -4, 32, 12, -16, -8, 0, -4, 0, -4, 0, -12, -12, 0, 0, 0, 8, -12, -4, 4, -16, -8, 4, 16, -8, 8, -12, -12, 12, -4, 0, 0, -4, 4, -4, 4, 16, -4, 0, -12, -4, -4, 8, 8, 4, 8, 8, -16, -8, -12, -8, 0, -4, 8, 4, -16, 8, -20, 24, -8],
+        [4, 4, 8, 0, 0, 4, 0, -4, 0, 4, 4, 4, 4, -8, -12, 12, 4, 12, 0, 8, 8, 12, -12, 0, -4, 16, 8, 0, 4, 4, -12, 8, 12, 0, 4, -4, 4, 4, -12, 16, 12, 4, 0, 12, 4, 4, -32, 8, 4, 0, 0, 0, -4, 8, 16, 12, 0, 0, 16, -4, 8, 8, 20, 12],
+        [36, -8, 0, 0, 28, -24, -12, -20, 48, 28, 8, 4, -4, -8, -12, -40, 24, -28, 20, 0, -8, -12, 0, 4, 8, 4, 0, 12, -36, 20, 12, 16, 8, 4, -12, 0, 4, -16, 48, -8, -4, 8, -32, 72, 52, -8, -8, 0, -40, 16, -8, -8, 8, 16, -16, -52, -16, 36, 32, 0, -8, -8, -32, 0],
+        [4, 4, 4, 16, -8, 8, -4, -12, 0, -4, 4, 4, 4, -4, -4, 0, 0, 4, 0, 0, 4, -4, 0, 8, 16, -12, 0, 0, 8, 0, 0, 8, -20, 0, -4, -12, -4, 0, 20, 4, 0, 4, -16, -16, -12, 12, 16, 12, -12, -8, 0, 8, -12, 16, 0, 8, -72, 0, -24, -8, 0, 32, 8, 28],
+    ],
+];
 
 /// EVAL-F: valores afinados de la corrección de PST por columna/fila.
 pub const PST_FR_DEFAULT: [[[i32; 16]; 6]; 2] = [
@@ -500,8 +530,11 @@ fn material_and_pst_components(
             material_eg += value;
             let (f, r) = ((idx & 7) as usize, 8 + (idx >> 3) as usize);
             let fr = &params.pst_fr;
-            pst_mg += p.mg[pt.index()][idx as usize] + fr[0][pt.index()][f] + fr[0][pt.index()][r];
-            pst_eg += p.eg[pt.index()][idx as usize] + fr[1][pt.index()][f] + fr[1][pt.index()][r];
+            let sqc = &params.pst_sq;
+            pst_mg += p.mg[pt.index()][idx as usize] + fr[0][pt.index()][f] + fr[0][pt.index()][r]
+                + sqc[0][pt.index()][idx as usize];
+            pst_eg += p.eg[pt.index()][idx as usize] + fr[1][pt.index()][f] + fr[1][pt.index()][r]
+                + sqc[1][pt.index()][idx as usize];
         }
     }
     ((material_mg, material_eg), (pst_mg, pst_eg))

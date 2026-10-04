@@ -318,8 +318,6 @@ pub struct LegalityContext {
     them: Color,
     ksq: Square,
     occ: Bitboard,
-    /// piezas enemigas que dan jaque al rey propio
-    checkers: Bitboard,
     /// numero de jaques (0, 1 o 2)
     ncheck: u32,
     /// piezas propias absolutamente clavadas
@@ -418,7 +416,6 @@ impl LegalityContext {
             them,
             ksq,
             occ,
-            checkers,
             ncheck,
             pinned,
             pin_ray,

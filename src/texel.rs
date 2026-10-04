@@ -351,14 +351,20 @@ pub fn fit_k(dataset: &Dataset, params: &EvalParams) -> f64 {
 /// +paso y −paso y se queda con lo que reduzca el error; repite pasadas
 /// hasta que ninguna mejora, y entonces reduce el paso. Determinista.
 pub fn tune(dataset: &Dataset, start: &EvalParams, k: f64) -> (EvalParams, f64, f64) {
+    tune_range(dataset, start, k, 0, &[8, 4, 2, 1])
+}
+
+/// Descenso por coordenadas solo sobre los parámetros con índice >= `from`,
+/// con los pasos dados (EVAL-H: afinar solo las correcciones nuevas).
+pub fn tune_range(dataset: &Dataset, start: &EvalParams, k: f64, from: usize, steps: &[i32]) -> (EvalParams, f64, f64) {
     let scalars = EvalParams::scalar_count();
     let mut v = start.to_vec();
     let e0 = error(dataset, start, k);
     let mut best_e = e0;
-    for &step in &[8, 4, 2, 1] {
+    for &step in steps {
         loop {
             let mut improved = false;
-            for i in 0..v.len() {
+            for i in from..v.len() {
                 for delta in [step, -step] {
                     let old = v[i];
                     let candidate = old + delta;
