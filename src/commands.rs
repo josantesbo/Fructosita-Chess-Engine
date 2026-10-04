@@ -169,6 +169,7 @@ pub fn run_selfplay(args: &[String]) {
             max_depth: 64,
             soft_deadline: now + Duration::from_millis(movetime_ms),
             hard_deadline: now + Duration::from_millis(movetime_ms * 3),
+            max_nodes: None,
         };
         let (mv, score) = search::lazy_smp_search(
             board,
@@ -349,7 +350,18 @@ pub fn run_texel_tune(args: &[String]) {
     eprintln!("posiciones {}", dataset.entries.len());
     let k = crate::texel::fit_k(&dataset, &start);
     eprintln!("K {k:.4} (fijada durante el afinado)");
-    let (tuned, e0, e1) = crate::texel::tune(&dataset, &start, k);
+    let opt = |name: &str| -> Option<f64> {
+        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok())
+    };
+    let from = opt("only_from").map(|x| x as usize).unwrap_or(0);
+    let steps: Vec<i32> = args
+        .iter()
+        .position(|a| a == "steps")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
+        .unwrap_or_else(|| vec![8, 4, 2, 1]);
+    eprintln!("only_from {from} steps {steps:?}");
+    let (tuned, e0, e1) = crate::texel::tune_range(&dataset, &start, k, from, &steps);
     println!("K {k:.4}");
     println!("E inicial {e0:.6}");
     println!("E final   {e1:.6}");

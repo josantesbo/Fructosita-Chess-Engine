@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_NAME: &str = "Fructosita 1.11.0";
+pub const ENGINE_NAME: &str = "Fructosita 2.0.0";
 pub const ENGINE_AUTHOR: &str = "Antonio Espinosa";
 const DEFAULT_HASH_MB: usize = 64;
 const DEFAULT_THREADS: usize = 1;
@@ -99,6 +99,7 @@ pub fn run() {
                 println!("option name Threads type spin default {DEFAULT_THREADS} min 1 max 64");
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
+                println!("option name Clear Hash type button");
                 println!("uciok");
             }
             "isready" => println!("readyok"),
@@ -137,7 +138,10 @@ pub fn run() {
                 state.stop_flag.store(true, Ordering::Relaxed);
                 break;
             }
-            "ponderhit" => {}
+            // Fructosita no anuncia `Ponder`; si una GUI envía `go ponder` de
+            // todos modos, `ponderhit` termina la búsqueda y juega ya (nunca
+            // se queda pensando sin reloj).
+            "ponderhit" => state.stop_flag.store(true, Ordering::Relaxed),
             _ => {} // Comandos no reconocidos se ignoran, según el protocolo UCI.
         }
         io::stdout().flush().ok();
@@ -207,6 +211,10 @@ fn handle_setoption(line: &str, state: &mut EngineState) {
     let name = rest[..value_pos].trim();
     let value = rest[value_pos + 7..].trim();
 
+    if name.eq_ignore_ascii_case("Clear Hash") {
+        state.tt.clear();
+        return;
+    }
     if name.eq_ignore_ascii_case("Hash") {
         if let Ok(mb) = value.parse::<usize>() {
             // No hace falta &mut: simplemente apuntamos a una tabla nueva.
@@ -278,6 +286,7 @@ fn handle_go(line: &str, state: &mut EngineState) {
     let mut depth_limit: Option<i32> = None;
     let mut infinite = false;
     let mut ponder = false;
+    let mut max_nodes: Option<u64> = None;
 
     let mut i = 0;
     while i < tokens.len() {
@@ -309,6 +318,10 @@ fn handle_go(line: &str, state: &mut EngineState) {
             "depth" => {
                 depth_limit = tokens.get(i + 1).and_then(|s| s.parse().ok());
                 max_depth = depth_limit.unwrap_or(64);
+                i += 1;
+            }
+            "nodes" => {
+                max_nodes = tokens.get(i + 1).and_then(|s| s.parse().ok());
                 i += 1;
             }
             "infinite" => infinite = true,
@@ -343,7 +356,11 @@ fn handle_go(line: &str, state: &mut EngineState) {
         max_depth,
         soft_deadline: now + soft,
         hard_deadline: now + hard,
+        max_nodes,
     };
+    // UCI: en `go infinite` y `go ponder`, `bestmove` solo tras `stop` (o
+    // `ponderhit`), aunque la búsqueda termine antes (p. ej. mate encontrado).
+    let wait_for_stop = infinite || ponder;
 
     state.stop_flag.store(false, Ordering::Relaxed);
     let stop_flag = Arc::clone(&state.stop_flag);
@@ -354,7 +371,10 @@ fn handle_go(line: &str, state: &mut EngineState) {
 
     let handle = thread::spawn(move || {
         let (best_move, _score) =
-            search::lazy_smp_search(board, limits, tt, game_history, stop_flag, threads);
+            search::lazy_smp_search(board, limits, tt, game_history, Arc::clone(&stop_flag), threads);
+        while wait_for_stop && !stop_flag.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_millis(1));
+        }
         println!("bestmove {best_move}");
         io::stdout().flush().ok();
     });

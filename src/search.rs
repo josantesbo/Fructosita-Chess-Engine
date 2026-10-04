@@ -56,6 +56,9 @@ const CONT_HISTORY_MAX: i16 = 16_384;
 // ---------------------------------------------------------------------------
 const LMR_BASE: f64 = 0.5;
 
+/// TM-04: caída de score (cp) entre iteraciones completadas que activa el modo pánico.
+const TM_PANIC_DROP: i32 = 30;
+
 // EXP-0013: con `false` todas las jugadas se puntúan ANTES de buscar la de la
 // TT (orden bit a bit igual al de EXP-0011: sirve para verificar el selector y
 // el validador). Con `true` solo se generan si la jugada de la TT no corta.
@@ -158,6 +161,8 @@ pub struct SearchLimits {
     pub max_depth: i32,
     pub soft_deadline: Instant,
     pub hard_deadline: Instant,
+    /// `go nodes N`: límite de nodos (aproximado a 2.048), o `None`.
+    pub max_nodes: Option<u64>,
 }
 
 /// EXP-0013: contadores del hilo, sin atómicos en el camino caliente. Se
@@ -181,14 +186,35 @@ struct LocalStats {
     lmp_prunes_beyond_lmr: u64,
 }
 
+/// SPEED-B: caché de evaluación estática por hilo. 2^18 entradas de 8 bytes
+/// (2 MB): 48 bits altos del hash Zobrist + eval en 16 bits. La eval es una
+/// función pura de la posición, así que un acierto devuelve exactamente lo que
+/// devolvería `evaluate` (salvo colisión de 48 bits, despreciable).
+const EVAL_CACHE_BITS: u32 = 18;
+const EVAL_KEY_MASK: u64 = !0xFFFF;
+
+#[inline]
+fn cached_eval(board: &Board, ctx: &mut SearchContext) -> i32 {
+    let idx = (board.hash as usize) & ((1usize << EVAL_CACHE_BITS) - 1);
+    let e = ctx.eval_cache[idx];
+    if e != 0 && (e & EVAL_KEY_MASK) == (board.hash & EVAL_KEY_MASK) {
+        return (e & 0xFFFF) as u16 as i16 as i32;
+    }
+    let v = eval::evaluate(board);
+    ctx.eval_cache[idx] = (board.hash & EVAL_KEY_MASK) | (v as i16 as u16 as u64);
+    v
+}
+
 struct SearchContext<'a> {
     stats: &'a SearchStats,
     ls: LocalStats,
+    eval_cache: Vec<u64>,
     /// Nodos de este hilo (no se reinicia al volcar): marca el chequeo de tiempo.
     ticks: u64,
     seldepth: u8,
     stop: &'a AtomicBool,
     hard_deadline: Instant,
+    max_nodes: Option<u64>,
     stopped: bool,
     is_main: bool,
     killers: [[Option<Move>; 2]; MAX_PLY],
@@ -307,7 +333,10 @@ impl<'a> SearchContext<'a> {
     fn check_time(&mut self) {
         if self.ticks.is_multiple_of(2048) {
             self.flush_stats();
-            if self.stop.load(Ordering::Relaxed) || Instant::now() >= self.hard_deadline {
+            let over_nodes = self
+                .max_nodes
+                .is_some_and(|n| self.stats.nodes.load(Ordering::Relaxed) >= n);
+            if over_nodes || self.stop.load(Ordering::Relaxed) || Instant::now() >= self.hard_deadline {
                 self.stopped = true;
             }
         }
@@ -533,7 +562,7 @@ fn quiescence(
 
     let in_check = board.in_check(board.side_to_move);
     let stand_pat = if !in_check || ply >= MAX_PLY {
-        eval::evaluate(board)
+        cached_eval(board, ctx)
     } else {
         0
     };
@@ -636,7 +665,7 @@ fn negamax(
         return 0;
     }
     if ply >= MAX_PLY {
-        return eval::evaluate(board);
+        return cached_eval(board, ctx);
     }
 
     let in_check = board.in_check(board.side_to_move);
@@ -703,7 +732,7 @@ fn negamax(
     // superior por debajo, o un valor exacto, son información de búsqueda real
     // sobre ESTE nodo. Así RFP, null move y futility deciden con mejor
     // estimación. Nunca con scores de mate.
-    let raw_eval = eval::evaluate(board);
+    let raw_eval = cached_eval(board, ctx);
     let static_eval = match &tt_probe {
         Some(e) if e.score.abs() < MATE_SCORE - MAX_PLY as i32 => {
             let tts = e.score;
@@ -796,6 +825,67 @@ fn negamax(
         if score >= beta {
             ctx.ls.null_move_cutoffs += 1;
             return if score >= MATE_SCORE - MAX_PLY as i32 { beta } else { score };
+        }
+    }
+
+    // SEARCH-E — RAZORING. En non-PV, sin jaque y a profundidad <= 2, si la
+    // eval estática está tan por debajo de alpha que ni una ganancia típica de
+    // un par de plies la acerca, se verifica con quiescencia (capturas): si
+    // tampoco supera alpha, el nodo falla bajo sin generar silenciosas.
+    // Margen propio: 250 cp por ply (≈ 2,7 peones a la escala pawn=93).
+    const RAZOR_MARGIN: i32 = 250;
+    if !is_pv
+        && !in_check
+        && depth <= 2
+        && alpha.abs() < MATE_SCORE - MAX_PLY as i32
+        && static_eval + RAZOR_MARGIN * depth < alpha
+    {
+        let q = quiescence(board, alpha, alpha + 1, ply, ctx);
+        if ctx.stopped {
+            return 0;
+        }
+        if q <= alpha {
+            return q;
+        }
+    }
+
+    // SEARCH-E — PROBCUT. En non-PV, a profundidad >= 5 y con beta lejos del
+    // mate, una captura (SEE suficiente) que en una búsqueda reducida
+    // (depth − 4) supera beta + 150 cp casi seguro supera beta a profundidad
+    // completa: el nodo se corta. Primero se filtra con quiescencia (barata).
+    // Concepto público (Buro, "ProbCut"); margen y reducción propios.
+    const PROBCUT_MARGIN: i32 = 150;
+    const PROBCUT_MIN_DEPTH: i32 = 5;
+    if !is_pv
+        && !in_check
+        && depth >= PROBCUT_MIN_DEPTH
+        && beta.abs() < MATE_SCORE - MAX_PLY as i32
+    {
+        let pc_beta = beta + PROBCUT_MARGIN;
+        let caps = crate::movegen::generate_legal_captures(board);
+        for mv in caps {
+            if mv.promotion().is_some() && mv.promotion() != Some(PieceType::Queen) {
+                continue;
+            }
+            if static_eval + crate::see::see(board, &mv) < pc_beta - 100 {
+                continue;
+            }
+            let next = board.make_move(mv);
+            ctx.tt.prefetch(next.hash);
+            ctx.game_history.push(next.hash);
+            let mut child_pv = Vec::new();
+            let mut v = -quiescence(&next, -pc_beta, -pc_beta + 1, ply + 1, ctx);
+            if !ctx.stopped && v >= pc_beta {
+                v = -negamax(&next, depth - 4, -pc_beta, -pc_beta + 1, ply + 1, &mut child_pv, ctx);
+            }
+            ctx.game_history.pop();
+            if ctx.stopped {
+                return 0;
+            }
+            if v >= pc_beta {
+                ctx.tt.store(board.hash, depth - 3, score_to_tt(v, ply), TTFlag::LowerBound, Some(mv));
+                return v;
+            }
         }
     }
 
@@ -1141,10 +1231,12 @@ fn iterative_deepening_one_thread(
     let mut ctx = SearchContext {
         stats,
         ls: LocalStats::default(),
+        eval_cache: vec![0u64; 1 << EVAL_CACHE_BITS],
         ticks: 0,
         seldepth: 0,
         stop,
         hard_deadline: limits.hard_deadline,
+        max_nodes: limits.max_nodes,
         stopped: false,
         is_main,
         killers: [[None; 2]; MAX_PLY],
@@ -1158,6 +1250,7 @@ fn iterative_deepening_one_thread(
 
     let start = Instant::now();
     let mut depth = 1;
+    let mut score_drop = 0i32;
     loop {
         if depth > limits.max_depth {
             break;
@@ -1204,6 +1297,10 @@ fn iterative_deepening_one_thread(
         if completed || depth == 1 {
             if !pv.is_empty() {
                 best_move = pv[0];
+                // TM-04: caída del score frente a la iteración completada anterior.
+                if completed && depth >= 6 {
+                    score_drop = best_score - score;
+                }
                 best_score = score;
             }
             last_completed_depth = depth;
@@ -1223,7 +1320,17 @@ fn iterative_deepening_one_thread(
         if ctx.stopped {
             break;
         }
-        if Instant::now() >= limits.soft_deadline {
+        // TM-04 ("pánico"): si la última iteración completada perdió >= 30 cp
+        // frente a la anterior, la posición se complica: se permite empezar otra
+        // iteración hasta el 100 % del presupuesto blando en vez del 60 %
+        // (el umbral se estira ×5/3; nunca más allá del plazo duro).
+        let soft = if score_drop >= TM_PANIC_DROP {
+            let base = limits.soft_deadline.saturating_duration_since(start);
+            (start + base * 5 / 3).min(limits.hard_deadline)
+        } else {
+            limits.soft_deadline
+        };
+        if Instant::now() >= soft {
             break;
         }
         depth += 1;
@@ -1303,6 +1410,7 @@ pub fn search_fixed_depth_with_stats(
         max_depth: depth,
         soft_deadline: Instant::now() + std::time::Duration::from_secs(86_400),
         hard_deadline: Instant::now() + std::time::Duration::from_secs(86_400),
+        max_nodes: None,
     };
     let result =
         iterative_deepening_one_thread(&board, &limits, &tt, game_history, &stop, &stats, false);
@@ -1323,6 +1431,7 @@ mod tests {
             max_depth: depth,
             soft_deadline: Instant::now() + Duration::from_secs(30),
             hard_deadline: Instant::now() + Duration::from_secs(30),
+            max_nodes: None,
         };
         lazy_smp_search(board, limits, tt, vec![board.hash], stop, 1)
     }
@@ -1390,6 +1499,7 @@ mod tests {
             max_depth: 64,
             soft_deadline: Instant::now() + Duration::from_secs(30),
             hard_deadline: Instant::now() + Duration::from_secs(30),
+            max_nodes: None,
         };
         let (mv, _) = lazy_smp_search(board, limits, tt, vec![board.hash], stop, 1);
         // Debe devolver un movimiento legal de la posición inicial pese a
@@ -1411,6 +1521,7 @@ mod tests {
             max_depth: 4,
             soft_deadline: Instant::now() + Duration::from_secs(30),
             hard_deadline: Instant::now() + Duration::from_secs(30),
+            max_nodes: None,
         };
         let (mv, score) = lazy_smp_search(board, limits, tt, vec![board.hash], stop, 4);
         assert!(
@@ -1431,6 +1542,7 @@ mod tests {
             max_depth: 64,
             soft_deadline: Instant::now() + Duration::from_secs(30),
             hard_deadline: Instant::now() + Duration::from_secs(30),
+            max_nodes: None,
         };
         let (mv, _) = lazy_smp_search(board, limits, tt, vec![board.hash], stop, 4);
         assert!(generate_legal_moves(&board).contains(&mv));

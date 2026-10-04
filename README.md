@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.11.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-2.0.0-orange" alt="version">
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
   <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
@@ -23,7 +23,7 @@
 
 **Fructosita** is an original UCI chess engine written from scratch in **Rust**.
 
-Version **1.11.0** extends the 1.7.0 line through four documented development steps: faster transposition-table and move-selection machinery, expanded handcrafted evaluation, additional pawn/king terms, and piece-square-table tuning by file and rank. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
+Version **2.0.0** is the first major release and consolidates the 1.8.0–1.11.0 development line with additional search, evaluation, speed, time-management, and UCI-robustness work. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
 
 The project follows a simple principle:
 
@@ -37,46 +37,38 @@ Fructosita is developed by **Antonio Espinosa**, a *Químico Farmacobiólogo* (c
 
 The project began on July 2, 2026 as a personal challenge to learn from scratch how a chess engine works. The name **Fructosita** comes from the author's undergraduate thesis work involving fructose.
 
-## Fructosita 1.11.0
+## Fructosita 2.0.0
 
-### What's new since 1.7.0
+### Main changes since 1.7.0
 
-The historical development path supplied with this version records:
+The historical 2.0.0 release material records:
 
-- **1.8.0 — search/TT speed work:** lock-less transposition table, TT prefetch, searching the TT move before full move generation, and lazy move selection.
-- **1.9.0 — evaluation expansion:** endgame knowledge, safe per-piece mobility, threats, hanging pieces, knight outposts, and Texel tuning.
-- **1.10.0 — king and pawn evaluation:** king shield and pawn storm terms, plus blocked/free passed-pawn evaluation.
-- **1.11.0 — PST refinement:** piece-square tables tuned by file and rank.
-
-These features are present in the supplied 1.11.0 source tree.
+- lock-less transposition table with 16-byte entries and prefetch;
+- TT move searched before full move generation and lazy move selection;
+- per-thread static-evaluation cache;
+- expanded endgame, mobility, threat, hanging-piece, outpost, king-safety and passed-pawn evaluation;
+- piece-square-table tuning by file/rank and per square;
+- **Razoring** and **ProbCut**;
+- panic-time extension when the score drops between completed iterations;
+- UCI robustness for `go infinite`, `go ponder`, `ponderhit`, `go nodes`, and `Clear Hash`.
 
 ## Strength evidence
 
-Historical release-preparation material supplied with 1.11.0 reports the following **parent-relative, early-stopped SPRT estimates**:
+The supplied historical release notes report a direct sealed-holdout comparison:
 
-| Step | Main change | Reported result vs parent |
-|---|---|---:|
-| 1.8.0 | Lock-less TT, prefetch, TT-first move handling, lazy move selection | **+45.9 ± 27.2 Elo** |
-| 1.9.0 | Expanded evaluation and Texel tuning | **+93.5 ± 41.9 Elo** |
-| 1.10.0 | King shield/storm and passed-pawn refinements | **+81.4 ± 37.0 Elo** |
-| 1.11.0 | File/rank PST tuning | **+91.7 ± 41.2 Elo** |
+- **Fructosita 2.0.0 vs 1.7.0: +239.2 ± 23.0 Elo**
+- **1,000 games**
+- **10+0.1** time control
+- sealed holdout openings created before the experiments and opened once for the final test
+- **0 crashes, 0 illegal moves, 0 time forfeits**
 
-These figures **must not be added together** and are not an absolute rating measurement. No independent 1.11.0-vs-1.7.0 holdout result is included in the supplied 1.11.0 publication bundle, so this release does not assign a derived absolute Elo rating from these SPRTs.
+The same material reports approximately **+30% nodes per second** and **−52% time to depth 12** relative to 1.7.0.
 
-The CCRL-era 1.3.4 value of roughly **2500 Elo** remains only an informal historical reference and is not used here to claim a formal rating for 1.11.0.
-
-## Historical bench identity
-
-The supplied release-preparation notes identify this version with measured experiment **EXP-0023** and report the deterministic depth-10 bench as:
-
-- nodes: **482,000**
-- signature: **`b5c444e86376ebbe`**
-
-This value should be reproduced from the publication tree before the tag is pushed.
+Using the previously documented informal 1.7.0 ballpark of roughly **2645–2650 Elo**, the direct +239.2 result implies an **informal development ballpark of about 2884–2889 Elo** for 2.0.0. This is **not a CCRL rating** and should not be presented as an independently measured absolute rating.
 
 ## Search
 
-Fructosita 1.11.0 includes:
+Fructosita 2.0.0 includes:
 
 - Principal Variation Search
 - Iterative deepening
@@ -87,22 +79,25 @@ Fructosita 1.11.0 includes:
 - Futility pruning
 - Late-move pruning
 - Internal iterative reductions
+- Razoring
+- ProbCut
 - Delta pruning in quiescence
 - Static Exchange Evaluation and SEE-based capture pruning
 - Killer, history, history-malus and continuation-history heuristics
 - Lock-less transposition table with aging and prefetch
 - TT probing in quiescence
 - TT-refined static evaluation
-- TT move validation and search before full move generation
+- TT move validation/search before full move generation
 - Lazy move selection
+- Per-thread evaluation cache
 
 ## Evaluation
 
-Fructosita 1.11.0 uses a handcrafted tapered evaluation including:
+Fructosita 2.0.0 uses a handcrafted tapered evaluation including:
 
 - Material
-- Piece-square tables with file/rank tuning
-- Mobility, including safe per-piece mobility
+- Piece-square tables with file/rank and per-square tuning
+- Safe per-piece mobility
 - Pawn structure and passed pawns
 - Blocked/free passed-pawn terms
 - King safety, king shield and pawn storm
@@ -113,27 +108,21 @@ Fructosita 1.11.0 uses a handcrafted tapered evaluation including:
 - Knight outposts
 - Endgame-specific knowledge
 
-## Engine
+## Engine and UCI
 
 - UCI protocol
 - Lazy SMP
 - Configurable hash table
 - Configurable thread count
 - Polyglot opening-book support
-- Deterministic time management
+- `go nodes`
+- `go infinite` / `go ponder` stop handling
+- `ponderhit`
+- `Clear Hash`
 - Built-in `perft`
 - Built-in `bench`
 - EPD testing tools
 - Texel tuning tools
-
-## UCI options
-
-Fructosita supports options including:
-
-- `Hash`
-- `Threads`
-- `OwnBook`
-- `BookFile`
 
 ## Usage
 
