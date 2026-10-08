@@ -2,6 +2,36 @@
 
 This changelog records the public history of Fructosita up to the version represented by this tag.
 
+## 2.3.1 — Learning search and a sharper king attack (2026)
+
+- Direct development calibration result vs 2.0.0: **+52.5 ± 16.5 Elo** across **800 games at 10+0.1**.
+- Evaluation cache retained between moves; the supplied historical release notes describe this as a speed-only change with identical search.
+- Historical measured-candidate identity: **EXP-0051**.
+- Historical depth-10 bench signature: **`b5c4f767593552bf`**.
+
+## 2.3.0 — Expanded king attack and positional evaluation (2026)
+
+- Added safe checks by piece type and undefended king-zone squares.
+- Added pawn-push threats and hanging-pawn terms.
+- Added rook-behind-passed-pawn and minor-behind-pawn terms.
+- Added pins, rook-on-queen threats, and knight/pawn-count interaction.
+- Joint re-tuning of the expanded handcrafted evaluation.
+- Reported parent-relative development SPRT at 5+0.05: **+31.6 ± 21.7 Elo**.
+
+## 2.2.0 — Persistent search statistics (2026)
+
+- History, continuation history, and correction history persist between moves instead of being reset at each `go`.
+- `ucinewgame` clears the retained search statistics.
+- Reported parent-relative development SPRT at 5+0.05: **+72 ± 32 Elo**, early stop.
+
+## 2.1.0 — Static-evaluation correction history (2026)
+
+- Added pawn-structure keyed correction history that learns the systematic difference between static evaluation and search results.
+- The corrected static evaluation is used by pruning decisions and quiescence stand-pat.
+- Reported parent-relative development SPRT at 5+0.05: **+17.7 ± 13.8 Elo**.
+
+The 2.1.0–2.3.0 parent-relative development results are not additive. The 2.3.1-vs-2.0.0 result is a separate direct calibration match using development openings.
+
 ## 2.0.0 — First major release (2026)
 
 - First release validated on a sealed holdout prepared before experimentation.
