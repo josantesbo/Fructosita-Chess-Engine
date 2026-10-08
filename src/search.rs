@@ -196,19 +196,106 @@ const EVAL_KEY_MASK: u64 = !0xFFFF;
 #[inline]
 fn cached_eval(board: &Board, ctx: &mut SearchContext) -> i32 {
     let idx = (board.hash as usize) & ((1usize << EVAL_CACHE_BITS) - 1);
-    let e = ctx.eval_cache[idx];
+    let e = ctx.hist.eval_cache[idx];
     if e != 0 && (e & EVAL_KEY_MASK) == (board.hash & EVAL_KEY_MASK) {
         return (e & 0xFFFF) as u16 as i16 as i32;
     }
     let v = eval::evaluate(board);
-    ctx.eval_cache[idx] = (board.hash & EVAL_KEY_MASK) | (v as i16 as u16 as u64);
+    ctx.hist.eval_cache[idx] = (board.hash & EVAL_KEY_MASK) | (v as i16 as u16 as u64);
     v
+}
+
+// ---------------------------------------------------------------------------
+// EXP-0033 (SEARCH-Q) — historial de corrección de la eval estática.
+// La eval HCE tiene sesgos sistemáticos que dependen de la estructura de peones
+// (p. ej. infravalora cierto tipo de centro bloqueado). Cada vez que un nodo
+// termina con un resultado de búsqueda fiable, la diferencia búsqueda − eval se
+// acumula (media móvil ponderada por profundidad) en una tabla indexada por
+// (bando al turno, firma de la estructura de peones). La eval estática que usan
+// las podas (RFP, null move, futility, razoring, ProbCut, improving) y el
+// stand-pat de la quiescencia se corrigen con esa media. Concepto público
+// ("static evaluation correction history"); tamaño, grano, pesos y tope propios.
+// ---------------------------------------------------------------------------
+const CORR_BITS: u32 = 14;
+const CORR_GRAIN: i32 = 256;
+const CORR_WEIGHT_SCALE: i32 = 256;
+const CORR_MAX: i32 = CORR_GRAIN * 48; // tope ±48 cp
+
+#[inline]
+fn pawn_key(board: &Board) -> usize {
+    let w = board.pieces[0][PieceType::Pawn.index()];
+    let b = board.pieces[1][PieceType::Pawn.index()];
+    let h = w.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xC2B2_AE3D_27D4_EB4F).rotate_left(29);
+    (h >> (64 - CORR_BITS)) as usize
+}
+
+#[inline]
+fn corrected_eval(board: &Board, raw: i32, ctx: &SearchContext) -> i32 {
+    let c = ctx.hist.corr[board.side_to_move.index()][pawn_key(board)] / CORR_GRAIN;
+    (raw + c).clamp(-MATE_SCORE + MAX_PLY as i32 + 1, MATE_SCORE - MAX_PLY as i32 - 1)
+}
+
+fn update_correction(board: &Board, ctx: &mut SearchContext, depth: i32, diff: i32) {
+    let e = &mut ctx.hist.corr[board.side_to_move.index()][pawn_key(board)];
+    let w = (depth + 1).min(16);
+    let target = diff.clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
+    *e = ((*e * (CORR_WEIGHT_SCALE - w) + target * w) / CORR_WEIGHT_SCALE).clamp(-CORR_MAX, CORR_MAX);
+}
+/// EXP-0032: historiales persistentes entre búsquedas. Antes cada `go` creaba
+/// historial mariposa y continuation history a cero: lo aprendido en la jugada
+/// anterior (qué silenciosas cortan en esta partida) se perdía. Ahora cada hilo
+/// devuelve sus tablas a este depósito al terminar y las recupera en la
+/// siguiente búsqueda, envejecidas a la mitad (la información vieja sigue
+/// ordenando las primeras iteraciones, pero la nueva la domina enseguida).
+/// `ucinewgame` vacía el depósito. Los killers no se conservan (son por ply).
+struct Histories {
+    /// PATCH G19: caché de eval (SPEED-B) persistente: la eval es función pura
+    /// de la posición, así que las entradas de jugadas anteriores siguen valiendo.
+    eval_cache: [u64; 1 << EVAL_CACHE_BITS],
+    butterfly: [[[i32; 64]; 64]; 2],
+    cont: [[[[i16; 64]; 6]; 64]; 6],
+    /// EXP-0046: correction history (EXP-0033) también persistente, sin
+    /// envejecer: el sesgo de la eval para una estructura no caduca por jugada.
+    corr: [[i32; 1 << CORR_BITS]; 2],
+}
+
+static HISTORY_POOL: std::sync::Mutex<Vec<Option<Box<Histories>>>> = std::sync::Mutex::new(Vec::new());
+
+/// Vacía los historiales guardados (nueva partida).
+pub fn clear_histories() {
+    if let Ok(mut pool) = HISTORY_POOL.lock() {
+        pool.clear();
+    }
+}
+
+fn take_histories(thread_id: usize) -> Box<Histories> {
+    let saved = HISTORY_POOL.lock().ok().and_then(|mut p| p.get_mut(thread_id).and_then(|x| x.take()));
+    match saved {
+        Some(mut h) => {
+            for c in h.butterfly.iter_mut() { for row in c.iter_mut() { for v in row.iter_mut() { *v /= 2; } } }
+            for a in h.cont.iter_mut() { for b in a.iter_mut() { for c in b.iter_mut() { for v in c.iter_mut() { *v /= 2; } } } }
+            h
+        }
+        None => {
+            // Construcción directa en el heap (evita 2x 300 KB en la pila).
+            // SAFETY: `Histories` son solo enteros; todo ceros es un valor válido.
+            unsafe { Box::new_zeroed().assume_init() }
+        }
+    }
+}
+
+fn give_back_histories(thread_id: usize, h: Box<Histories>) {
+    if let Ok(mut pool) = HISTORY_POOL.lock() {
+        if pool.len() <= thread_id {
+            pool.resize_with(thread_id + 1, || None);
+        }
+        pool[thread_id] = Some(h);
+    }
 }
 
 struct SearchContext<'a> {
     stats: &'a SearchStats,
     ls: LocalStats,
-    eval_cache: Vec<u64>,
     /// Nodos de este hilo (no se reinicia al volcar): marca el chequeo de tiempo.
     ticks: u64,
     seldepth: u8,
@@ -218,7 +305,8 @@ struct SearchContext<'a> {
     stopped: bool,
     is_main: bool,
     killers: [[Option<Move>; 2]; MAX_PLY],
-    history_heuristic: [[[i32; 64]; 64]; 2],
+    /// EXP-0032: historial mariposa + continuation history (persistentes).
+    hist: Box<Histories>,
     /// Evaluación estática por ply. La heurística "improving" compara la eval
     /// del nodo actual con la de dos plies antes (mismo bando al turno) para
     /// saber si la posición "va a mejor". Es infraestructura reutilizable por
@@ -237,7 +325,6 @@ struct SearchContext<'a> {
     /// saturación baja a 16.384 porque 1.000.000 no cabe en 16 bits: es una
     /// consecuencia FORZADA de la representación, no un reajuste de calibración.
     /// El factor `CONT_HISTORY_SCALE` permanece congelado en 20.
-    cont_history: Box<[[[[i16; 64]; 6]; 64]; 6]>,
     tt: &'a TranspositionTable,
     /// Hashes de todas las posiciones desde el inicio de la partida (o del
     /// FEN inicial) hasta el nodo actual, inclusive. Crece/decrece con la
@@ -254,10 +341,10 @@ impl<'a> SearchContext<'a> {
     }
 
     fn bump_history(&mut self, color: Color, mv: Move, depth: i32) {
-        let entry = &mut self.history_heuristic[color.index()][mv.from as usize][mv.to as usize];
+        let entry = &mut self.hist.butterfly[color.index()][mv.from as usize][mv.to as usize];
         *entry += depth * depth;
         if *entry > 1_000_000 {
-            for c in self.history_heuristic.iter_mut() {
+            for c in self.hist.butterfly.iter_mut() {
                 for row in c.iter_mut() {
                     for v in row.iter_mut() {
                         *v /= 2;
@@ -273,7 +360,7 @@ impl<'a> SearchContext<'a> {
     /// jugadas que fallan de forma repetida bajan en la ordenación (y la LMR las
     /// reduce antes). Suelo en −1.000.000, simétrico al techo del bonus.
     fn malus_history(&mut self, color: Color, mv: Move, depth: i32) {
-        let entry = &mut self.history_heuristic[color.index()][mv.from as usize][mv.to as usize];
+        let entry = &mut self.hist.butterfly[color.index()][mv.from as usize][mv.to as usize];
         *entry = (*entry - depth * depth).max(-1_000_000);
     }
 
@@ -286,10 +373,10 @@ impl<'a> SearchContext<'a> {
         }
         let (pp, pt) = self.move_stack[ply - 1];
         let entry =
-            &mut self.cont_history[pp.index()][pt as usize][piece.index()][to as usize];
+            &mut self.hist.cont[pp.index()][pt as usize][piece.index()][to as usize];
         *entry = entry.saturating_add((depth * depth) as i16);
         if *entry > CONT_HISTORY_MAX {
-            for a in self.cont_history.iter_mut() {
+            for a in self.hist.cont.iter_mut() {
                 for b in a.iter_mut() {
                     for c in b.iter_mut() {
                         for v in c.iter_mut() {
@@ -307,7 +394,7 @@ impl<'a> SearchContext<'a> {
             return 0;
         }
         let (pp, pt) = self.move_stack[ply - 1];
-        self.cont_history[pp.index()][pt as usize][piece.index()][to as usize] as i32
+        self.hist.cont[pp.index()][pt as usize][piece.index()][to as usize] as i32
     }
 
     fn flush_stats(&mut self) {
@@ -437,7 +524,7 @@ fn move_score(
         // (investigación 10). La división entre 2 es una DECISIÓN DE INGENIERÍA
         // PROVISIONAL para conservar el rango [.., 1.000.000] y no mover ningún
         // tier de ordenación; NO es parte de la hipótesis y puede reajustarse.
-        let h = ctx.history_heuristic[board.side_to_move.index()][mv.from as usize]
+        let h = ctx.hist.butterfly[board.side_to_move.index()][mv.from as usize]
             [mv.to as usize];
         if !ENABLE_CONT_HISTORY {
             return h;
@@ -562,7 +649,8 @@ fn quiescence(
 
     let in_check = board.in_check(board.side_to_move);
     let stand_pat = if !in_check || ply >= MAX_PLY {
-        cached_eval(board, ctx)
+        let raw = cached_eval(board, ctx);
+        corrected_eval(board, raw, ctx)
     } else {
         0
     };
@@ -732,7 +820,8 @@ fn negamax(
     // superior por debajo, o un valor exacto, son información de búsqueda real
     // sobre ESTE nodo. Así RFP, null move y futility deciden con mejor
     // estimación. Nunca con scores de mate.
-    let raw_eval = cached_eval(board, ctx);
+    let uncorrected = cached_eval(board, ctx);
+    let raw_eval = if in_check { uncorrected } else { corrected_eval(board, uncorrected, ctx) };
     let static_eval = match &tt_probe {
         Some(e) if e.score.abs() < MATE_SCORE - MAX_PLY as i32 => {
             let tts = e.score;
@@ -1155,6 +1244,19 @@ fn negamax(
     } else {
         TTFlag::Exact
     };
+    // EXP-0033: actualizar la corrección cuando el resultado es informativo:
+    // sin jaque, la mejor jugada no es captura ni promoción (la eval estática no
+    // mide material en vuelo), sin mate, y la cota apunta en la dirección de la
+    // diferencia (una cota superior solo dice algo si está por debajo de la eval).
+    if !in_check
+        && best_score.abs() < MATE_SCORE - MAX_PLY as i32
+        && best_move.is_none_or(|m| !m.is_capture() && m.promotion().is_none())
+        && !(flag == TTFlag::LowerBound && best_score <= raw_eval)
+        && !(flag == TTFlag::UpperBound && best_score >= raw_eval)
+    {
+        update_correction(board, ctx, depth, best_score - uncorrected);
+    }
+
     // La entrada guarda `iir_depth`, que es la profundidad REALMENTE buscada.
     // Guardar `depth` afirmaría más profundidad de la que se exploró y produciría
     // cortes de TT basados en una búsqueda más superficial: sería un fallo de
@@ -1222,6 +1324,7 @@ fn iterative_deepening_one_thread(
     stop: &AtomicBool,
     stats: &SearchStats,
     is_main: bool,
+    thread_id: usize,
 ) -> ThreadResult {
     let root_moves = generate_legal_moves(board);
     let mut best_move = root_moves[0];
@@ -1231,7 +1334,6 @@ fn iterative_deepening_one_thread(
     let mut ctx = SearchContext {
         stats,
         ls: LocalStats::default(),
-        eval_cache: vec![0u64; 1 << EVAL_CACHE_BITS],
         ticks: 0,
         seldepth: 0,
         stop,
@@ -1240,10 +1342,9 @@ fn iterative_deepening_one_thread(
         stopped: false,
         is_main,
         killers: [[None; 2]; MAX_PLY],
-        history_heuristic: [[[0; 64]; 64]; 2],
+        hist: take_histories(thread_id),
         eval_stack: [0; MAX_PLY],
         move_stack: [(PieceType::Pawn, 0); MAX_PLY],
-        cont_history: Box::new([[[[0i16; 64]; 6]; 64]; 6]),
         tt,
         game_history,
     };
@@ -1337,6 +1438,8 @@ fn iterative_deepening_one_thread(
     }
 
     ctx.flush_stats();
+    let SearchContext { hist, .. } = ctx;
+    give_back_histories(thread_id, hist);
     ThreadResult {
         depth: last_completed_depth,
         score: best_score,
@@ -1363,7 +1466,7 @@ pub fn lazy_smp_search(
 
     if threads == 1 {
         let result =
-            iterative_deepening_one_thread(&board, &limits, &tt, game_history, &stop, &stats, true);
+            iterative_deepening_one_thread(&board, &limits, &tt, game_history, &stop, &stats, true, 0);
         return (result.best_move, result.score);
     }
 
@@ -1375,7 +1478,7 @@ pub fn lazy_smp_search(
             let stats = &stats;
             let history = game_history.clone();
             handles.push(scope.spawn(move || {
-                iterative_deepening_one_thread(&board, &limits, tt, history, stop, stats, t == 0)
+                iterative_deepening_one_thread(&board, &limits, tt, history, stop, stats, t == 0, t)
             }));
         }
 
@@ -1412,8 +1515,10 @@ pub fn search_fixed_depth_with_stats(
         hard_deadline: Instant::now() + std::time::Duration::from_secs(86_400),
         max_nodes: None,
     };
+    // Bench/EPD: cada posición parte de historiales vacíos (firma reproducible).
+    clear_histories();
     let result =
-        iterative_deepening_one_thread(&board, &limits, &tt, game_history, &stop, &stats, false);
+        iterative_deepening_one_thread(&board, &limits, &tt, game_history, &stop, &stats, false, 0);
     (result.best_move, result.score, stats.snapshot())
 }
 

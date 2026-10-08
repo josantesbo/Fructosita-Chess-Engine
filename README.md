@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-2.0.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-2.3.1-orange" alt="version">
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
   <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
@@ -23,7 +23,7 @@
 
 **Fructosita** is an original UCI chess engine written from scratch in **Rust**.
 
-Version **2.0.0** is the first major release and consolidates the 1.8.0–1.11.0 development line with additional search, evaluation, speed, time-management, and UCI-robustness work. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
+Version **2.3.1** is an intermediate milestone after the 2.0.0 release. It adds search-side correction history, persistent search statistics between moves, a broader handcrafted king-attack and positional evaluation, and a persistent evaluation cache. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
 
 The project follows a simple principle:
 
@@ -37,38 +37,50 @@ Fructosita is developed by **Antonio Espinosa**, a *Químico Farmacobiólogo* (c
 
 The project began on July 2, 2026 as a personal challenge to learn from scratch how a chess engine works. The name **Fructosita** comes from the author's undergraduate thesis work involving fructose.
 
-## Fructosita 2.0.0
+## Fructosita 2.3.1
 
-### Main changes since 1.7.0
+### Main changes since 2.0.0
 
-The historical 2.0.0 release material records:
+The supplied historical release material records:
 
-- lock-less transposition table with 16-byte entries and prefetch;
-- TT move searched before full move generation and lazy move selection;
-- per-thread static-evaluation cache;
-- expanded endgame, mobility, threat, hanging-piece, outpost, king-safety and passed-pawn evaluation;
-- piece-square-table tuning by file/rank and per square;
-- **Razoring** and **ProbCut**;
-- panic-time extension when the score drops between completed iterations;
-- UCI robustness for `go infinite`, `go ponder`, `ponderhit`, `go nodes`, and `Clear Hash`.
+- **2.1.0 — static-evaluation correction history:** a pawn-structure keyed correction learns the systematic difference between static evaluation and search results, then refines the evaluation used by pruning decisions;
+- **2.2.0 — persistent search statistics:** history, continuation history, and correction history are retained between moves instead of being reset at every `go`; `ucinewgame` clears the retained state;
+- **2.3.0 — expanded evaluation:** safe checks, undefended king-zone squares, pawn-push threats, hanging pawns, rook behind passed pawn, minor behind pawn, pins, rook-on-queen threats, knight/pawn-count interaction, and joint re-tuning;
+- **2.3.1 — persistent evaluation cache:** the per-thread static-evaluation cache is kept between moves as a speed-only change, with identical search according to the historical release notes.
 
 ## Strength evidence
 
-The supplied historical release notes report a direct sealed-holdout comparison:
+The supplied historical release notes report a direct development calibration match:
 
-- **Fructosita 2.0.0 vs 1.7.0: +239.2 ± 23.0 Elo**
-- **1,000 games**
+- **Fructosita 2.3.1 vs 2.0.0: +52.5 ± 16.5 Elo**
+- **800 games**
 - **10+0.1** time control
-- sealed holdout openings created before the experiments and opened once for the final test
-- **0 crashes, 0 illegal moves, 0 time forfeits**
+- development openings
+- calibration match
 
-The same material reports approximately **+30% nodes per second** and **−52% time to depth 12** relative to 1.7.0.
+The same material records these parent-relative development results at 5+0.05:
 
-Using the previously documented informal 1.7.0 ballpark of roughly **2645–2650 Elo**, the direct +239.2 result implies an **informal development ballpark of about 2884–2889 Elo** for 2.0.0. This is **not a CCRL rating** and should not be presented as an independently measured absolute rating.
+- 2.1.0 vs parent: **+17.7 ± 13.8 Elo**
+- 2.2.0 vs parent: **+72 ± 32 Elo** — early stop
+- 2.3.0 vs parent: **+31.6 ± 21.7 Elo**
+
+These parent-relative values must **not** be added together. The direct 2.3.1-vs-2.0.0 calibration match is separate evidence.
+
+No absolute Elo rating is assigned to 2.3.1 by this publication package.
+
+## Historical measured-candidate identity
+
+The supplied release notes identify the measured candidate as **EXP-0051** and report that the 2.3.1 build differs only in its version string. They record a depth-10 bench signature of:
+
+```text
+b5c4f767593552bf
+```
+
+Publication validation should reproduce this signature before the release is finalized.
 
 ## Search
 
-Fructosita 2.0.0 includes:
+Fructosita 2.3.1 includes:
 
 - Principal Variation Search
 - Iterative deepening
@@ -84,16 +96,18 @@ Fructosita 2.0.0 includes:
 - Delta pruning in quiescence
 - Static Exchange Evaluation and SEE-based capture pruning
 - Killer, history, history-malus and continuation-history heuristics
+- Pawn-structure keyed static-evaluation correction history
+- Persistent history, continuation-history and correction-history statistics between moves
 - Lock-less transposition table with aging and prefetch
 - TT probing in quiescence
 - TT-refined static evaluation
 - TT move validation/search before full move generation
 - Lazy move selection
-- Per-thread evaluation cache
+- Per-thread evaluation cache retained between moves
 
 ## Evaluation
 
-Fructosita 2.0.0 uses a handcrafted tapered evaluation including:
+Fructosita 2.3.1 uses a handcrafted tapered evaluation including:
 
 - Material
 - Piece-square tables with file/rank and per-square tuning
@@ -102,10 +116,18 @@ Fructosita 2.0.0 uses a handcrafted tapered evaluation including:
 - Blocked/free passed-pawn terms
 - King safety, king shield and pawn storm
 - King-zone attack pressure
+- Safe-check opportunities by piece type
+- Undefended king-zone squares
 - Bishop-pair bonus
 - Rook bonuses on open and semi-open files
-- Threats and hanging pieces
+- Threats and hanging pieces, including hanging pawns
+- Pawn-push threats
 - Knight outposts
+- Rook behind passed pawn
+- Minor piece behind own pawn
+- Pins against the king
+- Rook-on-queen threats
+- Knight value interaction with own pawn count
 - Endgame-specific knowledge
 
 ## Engine and UCI

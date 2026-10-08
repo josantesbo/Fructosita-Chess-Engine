@@ -295,7 +295,8 @@ fn sigmoid(eval_cp: f64, k: f64) -> f64 {
 /// está.
 pub fn error(dataset: &Dataset, params: &EvalParams, k: f64) -> f64 {
     // EXP-0015: en paralelo por bloques (la suma por bloque es determinista).
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(4);
+    let threads = std::env::var("TEXEL_THREADS").ok().and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()).min(4));
     let chunk = dataset.entries.len().div_ceil(threads);
     let total: f64 = std::thread::scope(|sc| {
         let handles: Vec<_> = dataset
@@ -357,6 +358,12 @@ pub fn tune(dataset: &Dataset, start: &EvalParams, k: f64) -> (EvalParams, f64, 
 /// Descenso por coordenadas solo sobre los parámetros con índice >= `from`,
 /// con los pasos dados (EVAL-H: afinar solo las correcciones nuevas).
 pub fn tune_range(dataset: &Dataset, start: &EvalParams, k: f64, from: usize, steps: &[i32]) -> (EvalParams, f64, f64) {
+    tune_between(dataset, start, k, from, usize::MAX, steps)
+}
+
+/// Igual que `tune_range`, pero solo índices en [from, to) (G19: afinar solo
+/// los escalares nuevos sin tocar las PST que van detrás).
+pub fn tune_between(dataset: &Dataset, start: &EvalParams, k: f64, from: usize, to: usize, steps: &[i32]) -> (EvalParams, f64, f64) {
     let scalars = EvalParams::scalar_count();
     let mut v = start.to_vec();
     let e0 = error(dataset, start, k);
@@ -364,7 +371,7 @@ pub fn tune_range(dataset: &Dataset, start: &EvalParams, k: f64, from: usize, st
     for &step in steps {
         loop {
             let mut improved = false;
-            for i in from..v.len() {
+            for i in from..v.len().min(to) {
                 for delta in [step, -step] {
                     let old = v[i];
                     let candidate = old + delta;

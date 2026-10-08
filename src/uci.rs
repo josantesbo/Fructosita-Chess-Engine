@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_NAME: &str = "Fructosita 2.0.0";
+pub const ENGINE_NAME: &str = "Fructosita 2.3.1";
 pub const ENGINE_AUTHOR: &str = "Antonio Espinosa";
 const DEFAULT_HASH_MB: usize = 64;
 const DEFAULT_THREADS: usize = 1;
@@ -108,6 +108,7 @@ pub fn run() {
                 state.board = Board::start_pos();
                 state.game_history = vec![state.board.hash];
                 state.tt.clear();
+                search::clear_histories();
             }
             "position" => {
                 ensure_search_finished(&mut state);

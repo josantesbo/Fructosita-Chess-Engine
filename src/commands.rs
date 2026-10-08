@@ -361,7 +361,10 @@ pub fn run_texel_tune(args: &[String]) {
         .map(|s| s.split(',').filter_map(|x| x.parse().ok()).collect())
         .unwrap_or_else(|| vec![8, 4, 2, 1]);
     eprintln!("only_from {from} steps {steps:?}");
-    let (tuned, e0, e1) = crate::texel::tune_range(&dataset, &start, k, from, &steps);
+    let to = opt("only_to").map(|x| x as usize).unwrap_or(usize::MAX);
+    let k = opt("k").unwrap_or(k);
+    eprintln!("only_to {to} K {k:.4}");
+    let (tuned, e0, e1) = crate::texel::tune_between(&dataset, &start, k, from, to, &steps);
     println!("K {k:.4}");
     println!("E inicial {e0:.6}");
     println!("E final   {e1:.6}");

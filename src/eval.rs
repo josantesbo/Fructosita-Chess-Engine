@@ -126,55 +126,83 @@ pub const PST_FR_DEFAULT: [[[i32; 16]; 6]; 2] = [
 ];
 
 eval_params! {
-    pawn = 89,
-    knight = 382,
-    bishop = 401,
-    rook = 622,
-    queen = 1244,
+    pawn = 88,
+    knight = 384,
+    bishop = 400,
+    rook = 620,
+    queen = 1242,
     // EXP-0015: movilidad SEGURA por tipo de pieza (casillas no ocupadas por
     // piezas propias ni atacadas por peones rivales), en cp por casilla.
-    mob_knight_mg = 13,
-    mob_knight_eg = 1,
-    mob_bishop_mg = 9,
+    mob_knight_mg = 12,
+    mob_knight_eg = 0,
+    mob_bishop_mg = 8,
     mob_bishop_eg = 2,
-    mob_rook_mg = 5,
+    mob_rook_mg = 4,
     mob_rook_eg = 5,
-    mob_queen_mg = 5,
-    mob_queen_eg = 5,
+    mob_queen_mg = 4,
+    mob_queen_eg = 4,
     doubled_mg = 15,
-    doubled_eg = 19,
-    isolated_mg = 16,
-    isolated_eg = 15,
+    doubled_eg = 17,
+    isolated_mg = 14,
+    isolated_eg = 14,
     passed_base = 3,
     passed_advancement = 9,
     passed_protected = 0,
     passed_connected = 0,
-    passed_king_race = 23,
-    king_open_file = 21,
-    tempo = 31,
+    passed_king_race = 22,
+    king_open_file = 18,
+    tempo = 36,
     // EXP-0015: amenazas y piezas colgadas, outposts de caballo.
-    threat_pawn_mg = 73,
-    threat_pawn_eg = 15,
-    threat_minor_mg = 54,
-    threat_minor_eg = 7,
-    hanging_mg = 23,
+    threat_pawn_mg = 74,
+    threat_pawn_eg = 20,
+    threat_minor_mg = 56,
+    threat_minor_eg = 12,
+    hanging_mg = 20,
     hanging_eg = 36,
-    outpost_mg = 41,
+    outpost_mg = 36,
     outpost_eg = 12,
-    bishop_pair_mg = 45,
+    bishop_pair_mg = 47,
     bishop_pair_eg = 52,
-    rook_open_mg = 52,
+    rook_open_mg = 56,
     rook_open_eg = 0,
-    rook_semi_mg = 14,
-    rook_semi_eg = 15,
+    rook_semi_mg = 18,
+    rook_semi_eg = 16,
     // EVAL-E: escudo de peones delante del rey (1 y 2 filas), tormenta de
     // peones rivales que se acercan, y peón pasado bloqueado / con paso libre.
-    shield_near_mg = 12,
-    shield_far_mg = 4,
-    storm_mg = 0,
+    shield_near_mg = 4,
+    shield_far_mg = 2,
+    storm_mg = 2,
     passed_blocked_mg = 0,
-    passed_blocked_eg = 38,
+    passed_blocked_eg = 36,
     passed_free_eg = 13,
+    // EVAL-J: jaques seguros por tipo de pieza (casilla desde la que la pieza
+    // daría jaque, que ya ataca, libre de piezas propias y no atacada por el
+    // rival) y casillas de la zona del rey atacadas y sin ninguna defensa.
+    check_knight_mg = 84,
+    check_knight_eg = 0,
+    check_bishop_mg = 16,
+    check_bishop_eg = 30,
+    check_rook_mg = 73,
+    check_rook_eg = 2,
+    check_queen_mg = 29,
+    check_queen_eg = 14,
+    zone_weak_mg = 16,
+    // EVAL-L (valores iniciales 0; se afinan).
+    push_threat_mg = 14,
+    push_threat_eg = 13,
+    pawn_hanging_mg = 6,
+    pawn_hanging_eg = 38,
+    rook_behind_passer_eg = 57,
+    passer_kdist_enemy_eg = 0,
+    passer_kdist_own_eg = 0,
+    minor_behind_pawn_mg = 5,
+    // EVAL-M (valores iniciales 0; se afinan).
+    pinned_mg = 22,
+    pinned_eg = 85,
+    threat_rook_queen_mg = 68,
+    threat_rook_queen_eg = 8,
+    knight_per_pawn = 1,
+    rook_per_pawn = 0,
 }
 
 fn default_params() -> &'static EvalParams {
@@ -596,6 +624,8 @@ struct PieceScan {
     attacks: u64,
     /// Casillas atacadas por sus caballos y alfiles.
     minor_attacks: u64,
+    /// EVAL-J: ataques por tipo (caballo, alfil, torre, dama).
+    by_type: [u64; 4],
 }
 
 /// Movilidad y ataque al rey rival de `color` en un solo recorrido.
@@ -616,6 +646,7 @@ fn scan_pieces(board: &Board, color: Color, params: &EvalParams) -> PieceScan {
     let mut attackers = 0i32;
     let mut attacks = pawn_attacks_bb(own_pawns, color) | t.king_attacks(board.king_square(color));
     let mut minor_attacks = 0u64;
+    let mut by_type = [0u64; 4];
 
     for pt in [PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
         let (wmg, weg) = match pt {
@@ -634,6 +665,7 @@ fn scan_pieces(board: &Board, color: Color, params: &EvalParams) -> PieceScan {
                 _ => t.queen_attacks(sq, occ),
             };
             attacks |= att;
+            by_type[pt.index() - 1] |= att;
             if matches!(pt, PieceType::Knight | PieceType::Bishop) {
                 minor_attacks |= att;
             }
@@ -655,7 +687,156 @@ fn scan_pieces(board: &Board, color: Color, params: &EvalParams) -> PieceScan {
             king_attack /= 2;
         }
     }
-    PieceScan { mob_mg, mob_eg, king_attack, attacks, minor_attacks }
+    PieceScan { mob_mg, mob_eg, king_attack, attacks, minor_attacks, by_type }
+}
+
+#[inline]
+fn chebyshev(a: Square, b: Square) -> i32 {
+    let df = (file_of(a) as i32 - file_of(b) as i32).abs();
+    let dr = (rank_of(a) as i32 - rank_of(b) as i32).abs();
+    df.max(dr)
+}
+
+/// EVAL-L (diseño propio):
+/// - AMENAZA DE AVANCE: un peón propio puede avanzar una casilla sin ser
+///   capturado de balde y, desde allí, atacaría una pieza rival.
+/// - PEÓN COLGADO: peón rival atacado y sin ninguna defensa (el término de
+///   piezas colgadas de EVAL-D no incluye peones).
+/// - TORRE DETRÁS DEL PASADO: torre propia en la columna del pasado, detrás de
+///   él y con la línea libre hasta él (lo empuja y lo defiende al avanzar).
+/// - DISTANCIA DE LOS REYES a la casilla de avance del pasado (final): el rey
+///   rival lejos y el propio cerca deciden si el peón corre.
+/// - MENOR DETRÁS DE PEÓN: caballo/alfil propio con un peón propio justo
+///   delante: protegido de ataques frontales y sin bloquear la cadena.
+fn eval_l_terms(board: &Board, color: Color, params: &EvalParams, own: &PieceScan, their: &PieceScan) -> (i32, i32) {
+    let t = tables();
+    let ci = color.index();
+    let enemy = color.opposite();
+    let ei = enemy.index();
+    let occ = board.occupancy();
+    let own_pawns = board.pieces[ci][PieceType::Pawn.index()];
+    let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
+    let enemy_pieces = board.pieces[ei][PieceType::Knight.index()]
+        | board.pieces[ei][PieceType::Bishop.index()]
+        | board.pieces[ei][PieceType::Rook.index()]
+        | board.pieces[ei][PieceType::Queen.index()];
+    let enemy_pawn_att = pawn_attacks_bb(enemy_pawns, enemy);
+    let push = if color == Color::White { own_pawns << 8 } else { own_pawns >> 8 } & !occ;
+    let safe_push = push & !enemy_pawn_att & (own.attacks | !their.attacks);
+    let push_threats = count_bits(pawn_attacks_bb(safe_push, color) & enemy_pieces) as i32;
+    let pawn_hanging = count_bits(enemy_pawns & own.attacks & !their.attacks) as i32;
+    let mut mg = push_threats * params.push_threat_mg + pawn_hanging * params.pawn_hanging_mg;
+    let mut eg = push_threats * params.push_threat_eg + pawn_hanging * params.pawn_hanging_eg;
+
+    let minors = board.pieces[ci][PieceType::Knight.index()] | board.pieces[ci][PieceType::Bishop.index()];
+    let front_of_minors = if color == Color::White { minors << 8 } else { minors >> 8 };
+    mg += count_bits(front_of_minors & own_pawns) as i32 * params.minor_behind_pawn_mg;
+
+    let own_rooks = board.pieces[ci][PieceType::Rook.index()];
+    let own_king = board.king_square(color);
+    let enemy_king = board.king_square(enemy);
+    let mut pawns = own_pawns;
+    while pawns != EMPTY {
+        let sq = pop_lsb(&mut pawns);
+        if !is_passed_pawn(enemy_pawns, color, sq) {
+            continue;
+        }
+        let ahead = if color == Color::White { sq + 8 } else { sq.wrapping_sub(8) };
+        if ahead < 64 {
+            eg += chebyshev(enemy_king, ahead) * params.passer_kdist_enemy_eg
+                - chebyshev(own_king, ahead) * params.passer_kdist_own_eg;
+        }
+        if own_rooks != EMPTY {
+            let behind: u64 = if color == Color::White { (1u64 << sq) - 1 } else { !((2u64 << sq).wrapping_sub(1)) };
+            let file_mask = FILE_A << file_of(sq);
+            if t.rook_attacks(sq, occ) & file_mask & behind & own_rooks != EMPTY {
+                eg += params.rook_behind_passer_eg;
+            }
+        }
+    }
+    (mg, eg)
+}
+
+/// EVAL-M (diseño propio), desde el punto de vista de `color`:
+/// - CLAVADA: pieza rival (no peón) clavada contra su rey por un alfil, torre o
+///   dama propios (rayos x desde el rey rival): no puede moverse ni defender.
+/// - DAMA ATACADA POR TORRE: complementa las amenazas de EVAL-D (peón→pieza,
+///   menor→torre/dama).
+/// - CABALLO Y TORRE SEGÚN PEONES PROPIOS: el caballo gana valor con muchos
+///   peones (posición cerrada, apoyos); la torre lo pierde (menos columnas).
+fn eval_m_terms(board: &Board, color: Color, params: &EvalParams, own: &PieceScan) -> (i32, i32) {
+    let t = tables();
+    let ci = color.index();
+    let enemy = color.opposite();
+    let ei = enemy.index();
+    let occ = board.occupancy();
+    let ksq = board.king_square(enemy);
+    let their_pieces = board.pieces[ei][PieceType::Knight.index()]
+        | board.pieces[ei][PieceType::Bishop.index()]
+        | board.pieces[ei][PieceType::Rook.index()]
+        | board.pieces[ei][PieceType::Queen.index()];
+    let our_q = board.pieces[ci][PieceType::Queen.index()];
+    let diag_sliders = board.pieces[ci][PieceType::Bishop.index()] | our_q;
+    let line_sliders = board.pieces[ci][PieceType::Rook.index()] | our_q;
+    let mut pinned = 0i32;
+    let bd = t.bishop_attacks(ksq, occ);
+    let blockers = bd & their_pieces;
+    if blockers != EMPTY && diag_sliders != EMPTY {
+        let xray = t.bishop_attacks(ksq, occ & !blockers) & !bd;
+        let mut pinners = xray & diag_sliders;
+        while pinners != EMPTY {
+            let p = pop_lsb(&mut pinners);
+            if t.bishop_attacks(p, occ) & blockers & bd != EMPTY {
+                pinned += 1;
+            }
+        }
+    }
+    let rd = t.rook_attacks(ksq, occ);
+    let blockers = rd & their_pieces;
+    if blockers != EMPTY && line_sliders != EMPTY {
+        let xray = t.rook_attacks(ksq, occ & !blockers) & !rd;
+        let mut pinners = xray & line_sliders;
+        while pinners != EMPTY {
+            let p = pop_lsb(&mut pinners);
+            if t.rook_attacks(p, occ) & blockers & rd != EMPTY {
+                pinned += 1;
+            }
+        }
+    }
+    let rq = count_bits(own.by_type[2] & board.pieces[ei][PieceType::Queen.index()]) as i32;
+    let pawns = count_bits(board.pieces[ci][PieceType::Pawn.index()]) as i32;
+    let knights = count_bits(board.pieces[ci][PieceType::Knight.index()]) as i32;
+    let rooks = count_bits(board.pieces[ci][PieceType::Rook.index()]) as i32;
+    let imb = knights * pawns * params.knight_per_pawn - rooks * pawns * params.rook_per_pawn;
+    (pinned * params.pinned_mg + rq * params.threat_rook_queen_mg + imb,
+     pinned * params.pinned_eg + rq * params.threat_rook_queen_eg + imb)
+}
+
+/// EVAL-J (diseño propio): presión concreta sobre el rey rival.
+/// - JAQUE SEGURO: casilla desde la que una pieza propia de ese tipo daría
+///   jaque, que esa pieza ya ataca, sin pieza propia y NO atacada por el rival.
+///   Es la amenaza inmediata que la cuenta de "unidades" de EVAL-A no ve.
+/// - ZONA DÉBIL: casillas de la zona del rey rival que atacamos y que el rival
+///   no defiende con nada (ni con el propio rey).
+fn king_pressure(board: &Board, color: Color, params: &EvalParams, own: &PieceScan, their: &PieceScan) -> (i32, i32) {
+    let t = tables();
+    let enemy = color.opposite();
+    let ksq = board.king_square(enemy);
+    let occ = board.occupancy();
+    let free = !board.color_occupancy(color) & !their.attacks;
+    let n = count_bits(own.by_type[0] & t.knight_attacks(ksq) & free) as i32;
+    let bdiag = t.bishop_attacks(ksq, occ);
+    let rline = t.rook_attacks(ksq, occ);
+    let b = count_bits(own.by_type[1] & bdiag & free) as i32;
+    let r = count_bits(own.by_type[2] & rline & free) as i32;
+    let q = count_bits(own.by_type[3] & (bdiag | rline) & free) as i32;
+    let zone = king_zone(ksq, enemy);
+    let weak = count_bits(zone & own.attacks & !their.attacks) as i32;
+    let mg = n * params.check_knight_mg + b * params.check_bishop_mg + r * params.check_rook_mg
+        + q * params.check_queen_mg + weak * params.zone_weak_mg;
+    let eg = n * params.check_knight_eg + b * params.check_bishop_eg + r * params.check_rook_eg
+        + q * params.check_queen_eg;
+    (mg, eg)
 }
 
 /// EXP-0015 (EVAL-D): amenazas de `color` sobre el rival y outposts propios.
@@ -674,7 +855,10 @@ fn threats_and_outposts(
 ) -> (i32, i32) {
     let (xmg, xeg) = king_shelter_and_passers(board, color, params, their);
     let (tmg, teg) = threats_core(board, color, params, own, their);
-    (xmg + tmg, xeg + teg)
+    let (kmg, keg) = king_pressure(board, color, params, own, their);
+    let (lmg, leg) = eval_l_terms(board, color, params, own, their);
+    let (mmg, meg) = eval_m_terms(board, color, params, own);
+    (xmg + tmg + kmg + lmg + mmg, xeg + teg + keg + leg + meg)
 }
 
 /// EVAL-E (diseño propio):
