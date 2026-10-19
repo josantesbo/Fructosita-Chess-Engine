@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.0.0 — Singular search extensions and SPSA-tuned parameters (2026)
+
+- Adds singular extensions with multi-cut (historical 2.4.0 development step).
+- Tunes search parameters through SPSA and exposes selected values through UCI spin options.
+- Retains the handcrafted evaluation, correction history and persistent move-to-move search statistics.
+- Historical release notes report **+68.3 ± 15.3 Elo vs 2.0.0**, 1,000 games at 10+0.1 with sealed holdout openings (relative development result, not an official rating).
+- Historical bench signatures: depth 10 `b5c6d136e9144e36`; depth 12 `b5db3356890cf707`. Both historical bench signatures and node counts were reproduced during local publication validation on 2026-10-19.
+
+
 This changelog records the public history of Fructosita up to the version represented by this tag.
 
 ## 2.3.1 — Learning search and a sharper king attack (2026)

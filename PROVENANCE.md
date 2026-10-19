@@ -1,65 +1,29 @@
-# v2.3.1 publication provenance
+# Fructosita 3.0.0 — historical publication provenance
 
-This tag preserves the Fructosita 2.3.1 engine implementation supplied in the historical release bundle while adding publication documentation and correcting canonical repository metadata.
+The publication source is the supplied `v3.0.0.zip` bundle, preserved unchanged. It is not reconstructed from a later engine version.
 
-## Historical artifacts supplied for publication
+## Historical inputs
 
-- Outer historical bundle `v2.3.1.zip` SHA-256: `c84173c3a138f9e0c481d66d49e763f5197323af6bbfbf428be67c690515d623`
-- Historical Windows x86_64 binary SHA-256: `d1b1f794c039e649477d51bc90f7771f980b00e54cee48ee7040fb9602e5cda3`
-- Original supplied v2.3.1 source archive SHA-256: `064d5efdd00fe99777cb8d556dd2b629b77cb2d31091d47993d477bfa7d75dd6`
-- Historical `RELEASE_NOTES.md` SHA-256: `ba17f0b6133befcc0a5c5ed4fc0b105825bf565ff5e5497b15a57ec9971382be`
+- Original outer bundle `v3.0.0.zip`: SHA-256 `8fc889453d99072edf163c5ad0d587ba76ed4cddf34c318e421ce226d334cd3c`
+- Original source ZIP: SHA-256 `6cf0897d09c16527a0e656cf3e2059fe547a7ace2e333de6548cbd106bca4dd6`
+- Original Windows executable: SHA-256 `4abede018a485cd468f52c9210a74d521f5b9e0152aa4aef1a3b6207ad4a1007`
+- Original `RELEASE_NOTES.md`: SHA-256 `3b1d787fe6e40c4306e3a2e6c175612896b17b14fa6910e7886b322f9baf3457`
+- Original `SHA256SUMS.txt`: SHA-256 `6161d77c22eac61ba369e319bc51f03b81b9377c1e0811a8f587791124630a69`
 
-The original source archive contains the actual Rust source tree (`src/`), `testdata/`, `Cargo.toml`, `Cargo.lock`, `.gitignore`, and the GPL license.
+The original bundle carries 29 regular source files under `fructosita-3.0.0/` and four regular files in its outer distribution directory.
 
-## Chronological scope
+## Publication-only differences
 
-Publication documentation for this tag is intentionally limited to information available up to **Fructosita 2.3.1**. No numbered Fructosita version later than 2.3.1 is intentionally referenced.
+The source implementation under `src/`, `testdata/`, `Cargo.lock` and `LICENSE` is byte-for-byte identical to the supplied source archive. Publication-specific changes are confined to:
 
-No explicit references to numbered Fructosita versions later than 2.3.1 were found in the supplied Rust source tree. Historical technical comments and experiment identifiers in the source are preserved rather than rewritten merely for style.
+- `Cargo.toml`: canonical repository URL corrected from `jordiqui/Fructosita-Chess-Engine` to `josantesbo/Fructosita-Chess-Engine`; version and build settings unchanged.
+- `.gitignore`: adopted publication ignore policy from the supplied 2.3.1 GIT-READY reference.
+- `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PROVENANCE.md`: publication documentation added from or adapted using the historical 2.3.1 GIT-READY format.
 
-## Publication-only changes
+This package intentionally does **not** include `.git/`, `.github/`, or `assets/`; the latter two are to be preserved in the official clone at the controlled copying stage. It contains no git branch, commit, tag, push, or GitHub release operation.
 
-The engine implementation under `src/`, `Cargo.lock`, `testdata/`, and the GPL license text is preserved byte-for-byte from the supplied v2.3.1 source archive.
+## Historical results and status
 
-For publication in the canonical repository:
+The supplied v3.0.0 release notes report +68.3 ± 15.3 Elo against 2.0.0 over 1,000 games at 10+0.1 with sealed holdout openings. It is a reported relative comparison and not a CCRL rating. Depth-10 signature `b5c6d136e9144e36` and depth-12 signature `b5db3356890cf707` are historical claims pending local reproduction.
 
-- `Cargo.toml` repository metadata is changed from `jordiqui/Fructosita-Chess-Engine` to `josantesbo/Fructosita-Chess-Engine`;
-- the canonical repository `.gitignore` policy is retained instead of the minimal historical `target/` entry;
-- README, changelog, security, contribution, and provenance documentation are added or updated for publication;
-- existing project artwork under `assets/` and repository automation under `.github/` are intended to be preserved from the canonical repository during the controlled copy step.
-
-No engine logic is intentionally changed by these publication edits.
-
-## Strength provenance
-
-The supplied historical `RELEASE_NOTES.md` reports a direct **2.3.1 vs 2.0.0** development calibration result of **+52.5 ± 16.5 Elo** over **800 games at 10+0.1**, using development openings.
-
-The same notes report these parent-relative development SPRTs at **5+0.05**:
-
-- 2.1.0 vs parent: **+17.7 ± 13.8 Elo**
-- 2.2.0 vs parent: **+72 ± 32 Elo**, early stop
-- 2.3.0 vs parent: **+31.6 ± 21.7 Elo**
-
-These parent-relative results must not be added together. The direct 2.3.1-vs-2.0.0 calibration match is separate evidence.
-
-No absolute Elo rating is assigned to 2.3.1 by this publication package.
-
-## Source-change provenance vs 2.0.0
-
-A source-tree comparison against the published 2.0.0 snapshot shows substantive Rust-source changes in:
-
-- `src/commands.rs`
-- `src/eval.rs`
-- `src/search.rs`
-- `src/texel.rs`
-- `src/uci.rs`
-
-The supplied 2.3.1 source contains the release-note features including static-evaluation correction history, persistent search statistics between moves, expanded king-attack and positional evaluation terms, joint evaluation re-tuning, and a persistent evaluation cache.
-
-## Bench provenance
-
-The supplied historical release notes identify the measured candidate as **EXP-0051** and state that the 2.3.1 source was built from the exact measured source with only the version string changed.
-
-They report a depth-10 bench signature of **`b5c4f767593552bf`**.
-
-This signature should be reproduced from the Git-ready publication tree before the tag is published. The historical release notes do not state a bench node count, so a locally produced node count should be recorded as publication validation rather than claimed as a supplied historical value.
+The original GIT-READY workspace was prepared without fresh execution tests. During subsequent publication validation on 2026-10-19, the source compiled successfully with Rust 1.96.1; all 91 Rust tests passed; three independent perft cases matched their reference node counts; UCI initialization and a depth-5 search succeeded; and historical depth-10 and depth-12 bench node counts and signatures were reproduced. The historical 1,000-game Elo result was not rerun. No fresh PGN match validation was performed.
