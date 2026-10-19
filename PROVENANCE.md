@@ -16,7 +16,8 @@ The original bundle carries 29 regular source files under `fructosita-3.0.0/` an
 
 The source implementation under `src/`, `testdata/`, `Cargo.lock` and `LICENSE` is byte-for-byte identical to the supplied source archive. Publication-specific changes are confined to:
 
-- `Cargo.toml`: canonical repository URL corrected from `jordiqui/Fructosita-Chess-Engine` to `josantesbo/Fructosita-Chess-Engine`; version and build settings unchanged.
+- Cargo.toml: Updated the repository metadata to reference the official Fructosita repository. The package version and build configuration remain unchanged.
+
 - `.gitignore`: adopted publication ignore policy from the supplied 2.3.1 GIT-READY reference.
 - `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `PROVENANCE.md`: publication documentation added from or adapted using the historical 2.3.1 GIT-READY format.
 
