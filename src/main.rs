@@ -27,6 +27,7 @@ mod magic_constants;
 mod movegen;
 mod moves;
 mod perft;
+mod tune;
 mod polyglot_random;
 mod search;
 mod see;

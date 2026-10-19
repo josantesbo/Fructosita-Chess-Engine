@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 //! Búsqueda del motor: negamax con poda alfa-beta, Principal Variation
 //! Search (PVS), null-move pruning, Late Move Reductions (LMR), extensión
 //! por jaque, quiescence search, y profundización iterativa con manejo de
@@ -7,6 +8,7 @@
 //! implementadas aquí desde cero, no copiadas de ningún motor existente.
 
 use crate::board::Board;
+use crate::tune;
 use crate::eval;
 use crate::movegen::generate_legal_moves;
 use crate::moves::Move;
@@ -54,28 +56,34 @@ const CONT_HISTORY_MAX: i16 = 16_384;
 //       como mucho 3 plies más corta antes de verificarla.
 // Resolviendo R = a + ln d · ln m / c con (a), (b): a ≈ 0,5, c ≈ 3,0.
 // ---------------------------------------------------------------------------
-const LMR_BASE: f64 = 0.5;
 
-/// TM-04: caída de score (cp) entre iteraciones completadas que activa el modo pánico.
-const TM_PANIC_DROP: i32 = 30;
+
+/// TM-04: la caída de score que activa el modo pánico es `tune::TM_PANIC_DROP` (30 cp).
+
+// EXP-0014 (SEARCH-D): singular extensions. Profundidad mínima, margen en cp
+// por ply de profundidad (a la escala pawn=70: d=10 -> 20 cp, menos de un
+// tercio de peón) y guarda de explosión (ply < 2·profundidad raíz).
+// G19: SE_MIN_DEPTH y SE_MARGIN son ajustables (`tune::SE_MIN_DEPTH`, `tune::SE_MARGIN`; 8 y 2).
 
 // EXP-0013: con `false` todas las jugadas se puntúan ANTES de buscar la de la
 // TT (orden bit a bit igual al de EXP-0011: sirve para verificar el selector y
 // el validador). Con `true` solo se generan si la jugada de la TT no corta.
 const LAZY_GEN: bool = true;
-const LMR_DIVISOR: f64 = 3.0;
 
-fn lmr_table() -> &'static [[i32; 64]; 64] {
-    static TABLE: std::sync::OnceLock<[[i32; 64]; 64]> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut t = [[0i32; 64]; 64];
-        for (d, row) in t.iter_mut().enumerate().skip(1) {
-            for (m, r) in row.iter_mut().enumerate().skip(1) {
-                *r = (LMR_BASE + (d as f64).ln() * (m as f64).ln() / LMR_DIVISOR) as i32;
-            }
+
+/// G19: la tabla se calcula al empezar cada búsqueda con los parámetros
+/// ajustables (`tune::LMR_BASE_X100`, `tune::LMR_DIV_X100`); por defecto
+/// 0,5 y 3,0, exactamente como antes.
+fn lmr_table() -> Box<[[i32; 64]; 64]> {
+    let base = tune::get(tune::LMR_BASE_X100) as f64 / 100.0;
+    let div = tune::get(tune::LMR_DIV_X100) as f64 / 100.0;
+    let mut t = Box::new([[0i32; 64]; 64]);
+    for (d, row) in t.iter_mut().enumerate().skip(1) {
+        for (m, r) in row.iter_mut().enumerate().skip(1) {
+            *r = (base + (d as f64).ln() * (m as f64).ln() / div) as i32;
         }
-        t
-    })
+    }
+    t
 }
 
 #[derive(Debug, Default)]
@@ -294,8 +302,15 @@ fn give_back_histories(thread_id: usize, h: Box<Histories>) {
 }
 
 struct SearchContext<'a> {
+    /// G19: tabla LMR de esta búsqueda (parámetros ajustables).
+    lmr: Box<[[i32; 64]; 64]>,
     stats: &'a SearchStats,
     ls: LocalStats,
+    /// EXP-0014: jugada excluida en la búsqueda de verificación singular de
+    /// cada ply (misma posición, todas las jugadas salvo esta).
+    excluded: [Option<Move>; MAX_PLY],
+    /// Profundidad de la iteración en curso (guarda de las extensiones).
+    root_depth: i32,
     /// Nodos de este hilo (no se reinicia al volcar): marca el chequeo de tiempo.
     ticks: u64,
     seldepth: u8,
@@ -699,14 +714,14 @@ fn quiescence(
     // NADA MÁS cambia: SEE, ordenación, stand-pat, ventana, profundidad de
     // quiescencia y generación de capturas quedan intactos.
     // -------------------------------------------------------------------
-    const DELTA_MARGIN: i32 = 200;
+    let delta_margin: i32 = tune::get(tune::DELTA_MARGIN);
 
     let mut best = if in_check { -INFINITY } else { alpha };
     for (mv, see_v) in moves {
         if !in_check
             && mv.promotion().is_none()
             && alpha > -MATE_SCORE + MAX_PLY as i32
-            && stand_pat.saturating_add(see_v).saturating_add(DELTA_MARGIN) <= alpha
+            && stand_pat.saturating_add(see_v).saturating_add(delta_margin) <= alpha
         {
             continue;
         }
@@ -771,13 +786,16 @@ fn negamax(
         ctx.seldepth = ply as u8;
     }
 
+    // EXP-0014: en la búsqueda de verificación singular la entrada de la TT
+    // describe el nodo COMPLETO (con la jugada excluida): no puede cortar.
+    let excluded = ctx.excluded[ply];
     ctx.ls.tt_probes += 1;
     let tt_probe = ctx.tt.probe(board.hash);
     let mut tt_move = None;
     if let Some(entry) = &tt_probe {
         ctx.ls.tt_hits += 1;
         tt_move = entry.best_move;
-        if entry.depth as i32 >= depth && ply > 0 {
+        if entry.depth as i32 >= depth && ply > 0 && excluded.is_none() {
             let score = score_from_tt(entry.score, ply);
             let usable = match entry.flag {
                 TTFlag::Exact => true,
@@ -854,11 +872,12 @@ fn negamax(
     // "improving": cuando la posición NO mejora se exige menos colchón (se poda
     // algo más). Constantes de partida, a afinar por SPRT — NO copiadas.
     const RFP_MAX_DEPTH: i32 = 6;
-    const RFP_MARGIN: i32 = 80; // centipeones por unidad de profundidad
-    const RFP_IMPROVING_BONUS: i32 = 25; // colchón extra cuando la posición mejora
+    let RFP_MARGIN: i32 = tune::get(tune::RFP_MARGIN); // centipeones por unidad de profundidad
+    let RFP_IMPROVING_BONUS: i32 = tune::get(tune::RFP_IMPROVING_BONUS); // colchón extra cuando la posición mejora
     let rfp_margin = RFP_MARGIN - if improving { 0 } else { RFP_IMPROVING_BONUS };
     if beta - alpha == 1
         && !in_check
+        && excluded.is_none()
         && depth <= RFP_MAX_DEPTH
         && beta < MATE_SCORE - MAX_PLY as i32
         && static_eval - rfp_margin * depth >= beta
@@ -886,6 +905,7 @@ fn negamax(
     let is_pv = beta - alpha > 1;
     if !is_pv
         && !in_check
+        && excluded.is_none()
         && depth >= 3
         && ply > 0
         && static_eval >= beta
@@ -893,7 +913,7 @@ fn negamax(
         && has_non_pawn_material(board, board.side_to_move)
     {
         ctx.ls.null_move_attempts += 1;
-        let null_r = 3 + depth / 4 + ((static_eval - beta) / 200).min(2);
+        let null_r = 3 + depth / 4 + ((static_eval - beta) / tune::get(tune::NULL_DIV)).min(2);
         let null_board = board.make_null_move();
         ctx.tt.prefetch(null_board.hash);
         ctx.game_history.push(null_board.hash);
@@ -922,9 +942,10 @@ fn negamax(
     // un par de plies la acerca, se verifica con quiescencia (capturas): si
     // tampoco supera alpha, el nodo falla bajo sin generar silenciosas.
     // Margen propio: 250 cp por ply (≈ 2,7 peones a la escala pawn=93).
-    const RAZOR_MARGIN: i32 = 250;
+    let RAZOR_MARGIN: i32 = tune::get(tune::RAZOR_MARGIN);
     if !is_pv
         && !in_check
+        && excluded.is_none()
         && depth <= 2
         && alpha.abs() < MATE_SCORE - MAX_PLY as i32
         && static_eval + RAZOR_MARGIN * depth < alpha
@@ -943,10 +964,11 @@ fn negamax(
     // (depth − 4) supera beta + 150 cp casi seguro supera beta a profundidad
     // completa: el nodo se corta. Primero se filtra con quiescencia (barata).
     // Concepto público (Buro, "ProbCut"); margen y reducción propios.
-    const PROBCUT_MARGIN: i32 = 150;
+    let PROBCUT_MARGIN: i32 = tune::get(tune::PROBCUT_MARGIN);
     const PROBCUT_MIN_DEPTH: i32 = 5;
     if !is_pv
         && !in_check
+        && excluded.is_none()
         && depth >= PROBCUT_MIN_DEPTH
         && beta.abs() < MATE_SCORE - MAX_PLY as i32
     {
@@ -986,9 +1008,13 @@ fn negamax(
     // selección perezosa (máximo con desempate por orden de generación): el
     // mismo orden que la ordenación estable anterior, sin ordenar la lista.
     let us = board.side_to_move;
-    let tt_first = tt_move.filter(|&m| {
-        crate::movegen::is_pseudo_legal(board, m) && !board.make_move(m).in_check(us)
-    });
+    let tt_first = if excluded.is_some() {
+        None
+    } else {
+        tt_move.filter(|&m| {
+            crate::movegen::is_pseudo_legal(board, m) && !board.make_move(m).in_check(us)
+        })
+    };
     let mut moves: Vec<Move> = Vec::new();
     let mut scores: Vec<i32> = Vec::new();
     let mut generated = false;
@@ -1001,8 +1027,44 @@ fn negamax(
                 0
             };
         }
-        scores = score_moves(&mut moves, tt_first, board, tt_move, ply, ctx);
+        scores = score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx);
         generated = true;
+    }
+
+    // -------------------------------------------------------------------
+    // EXP-0014 (SEARCH-D): SINGULAR EXTENSIONS. Si la jugada de la TT viene
+    // de una búsqueda casi tan profunda con cota inferior (o exacta), se
+    // comprueba si es la ÚNICA buena: se busca el resto de jugadas a media
+    // profundidad con ventana nula en s_beta = score_tt − margen. Si todas
+    // fallan por debajo, la jugada es "singular" (la posición depende de ella)
+    // y se extiende 1 ply. Si el resto ya alcanza s_beta >= beta, hay varias
+    // jugadas que cortan (multi-cut) y el nodo se resuelve con s_beta.
+    // Concepto público (CPW "Singular Extensions"); umbrales propios.
+    // -------------------------------------------------------------------
+    let mut singular_ext = 0;
+    if let (Some(ttm), Some(entry)) = (tt_first, &tt_probe) {
+        if ply > 0
+            && depth >= tune::get(tune::SE_MIN_DEPTH)
+            && entry.depth as i32 >= depth - 3
+            && matches!(entry.flag, TTFlag::LowerBound | TTFlag::Exact)
+            && entry.score.abs() < MATE_SCORE - MAX_PLY as i32
+            && (ply as i32) < 2 * ctx.root_depth
+        {
+            let s_beta = entry.score - tune::get(tune::SE_MARGIN) * depth;
+            let s_depth = (depth - 1) / 2;
+            ctx.excluded[ply] = Some(ttm);
+            let mut tmp_pv = Vec::new();
+            let v = negamax(board, s_depth, s_beta - 1, s_beta, ply, &mut tmp_pv, ctx);
+            ctx.excluded[ply] = None;
+            if ctx.stopped {
+                return 0;
+            }
+            if v < s_beta {
+                singular_ext = 1;
+            } else if s_beta >= beta {
+                return s_beta;
+            }
+        }
     }
 
     let mut best_score = -INFINITY;
@@ -1021,9 +1083,9 @@ fn negamax(
     // si alpha está en rango de mate. Constantes de partida, a afinar por SPRT —
     // NO copiadas. Ver research/03-futility-pruning.
     const FUTILITY_MAX_DEPTH: i32 = 4;
-    const FUTILITY_BASE: i32 = 100; // cp
-    const FUTILITY_STEP: i32 = 100; // cp por unidad de profundidad
-    const FUTILITY_IMPROVING_BONUS: i32 = 50; // colchón extra cuando mejora
+    let FUTILITY_BASE: i32 = tune::get(tune::FUTILITY_BASE); // cp
+    let FUTILITY_STEP: i32 = tune::get(tune::FUTILITY_STEP); // cp por unidad de profundidad
+    let FUTILITY_IMPROVING_BONUS: i32 = tune::get(tune::FUTILITY_IMPROVING_BONUS); // colchón extra cuando mejora
 
     // Late Move Pruning (move-count): poda por CONTEO de jugadas, no por eval.
     // Cerca de las hojas, una vez probadas suficientes silenciosas, las
@@ -1034,7 +1096,7 @@ fn negamax(
     // `continue` solo-silenciosas, NUNCA `break`. Constantes de partida a afinar
     // por SPRT — NO copiadas. Ver research/04-late-move-pruning §8.
     const LMP_MAX_DEPTH: i32 = 4;
-    const LMP_BASE: i32 = 3;
+    let LMP_BASE: i32 = tune::get(tune::LMP_BASE);
     const LMP_C: i32 = 1;
     const LMP_IMPROVING_BONUS: i32 = 1; // en unidades de conteo
     let lmp_count =
@@ -1052,7 +1114,7 @@ fn negamax(
         } else {
             if !generated {
                 moves = generate_legal_moves(board);
-                scores = score_moves(&mut moves, tt_first, board, tt_move, ply, ctx);
+                scores = score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx);
                 generated = true;
             }
             match pick_best(&mut scores) {
@@ -1072,7 +1134,7 @@ fn negamax(
         // plies no hay tiempo de recuperar ese material. Nunca la primera
         // jugada, nunca promociones, nunca si da jaque ni con alpha de mate.
         const SEE_PRUNE_MAX_DEPTH: i32 = 4;
-        const SEE_PRUNE_MARGIN: i32 = 100;
+        let SEE_PRUNE_MARGIN: i32 = tune::get(tune::SEE_PRUNE_MARGIN);
         if i > 0
             && beta - alpha == 1
             && !in_check
@@ -1141,7 +1203,8 @@ fn negamax(
         let mut child_pv = Vec::new();
 
         let score = if i == 0 {
-            -negamax(&next, iir_depth - 1, -beta, -alpha, ply + 1, &mut child_pv, ctx)
+            let ext = if tt_first == Some(mv) { singular_ext } else { 0 };
+            -negamax(&next, iir_depth - 1 + ext, -beta, -alpha, ply + 1, &mut child_pv, ctx)
         } else {
             // EXP-0005 (SEARCH-A): LMR logarítmica (ver `lmr_table`). Se aplica
             // a silenciosas desde la 3ª jugada en non-PV y desde la 4ª en PV,
@@ -1158,7 +1221,7 @@ fn negamax(
                 && !next.in_check(next.side_to_move)
             {
                 ctx.ls.lmr_attempts += 1;
-                let mut r = lmr_table()[(depth as usize).min(63)][i.min(63)];
+                let mut r = ctx.lmr[(depth as usize).min(63)][i.min(63)];
                 if !improving {
                     r += 1;
                 }
@@ -1249,6 +1312,7 @@ fn negamax(
     // mide material en vuelo), sin mate, y la cota apunta en la dirección de la
     // diferencia (una cota superior solo dice algo si está por debajo de la eval).
     if !in_check
+        && excluded.is_none()
         && best_score.abs() < MATE_SCORE - MAX_PLY as i32
         && best_move.is_none_or(|m| !m.is_capture() && m.promotion().is_none())
         && !(flag == TTFlag::LowerBound && best_score <= raw_eval)
@@ -1261,6 +1325,10 @@ fn negamax(
     // Guardar `depth` afirmaría más profundidad de la que se exploró y produciría
     // cortes de TT basados en una búsqueda más superficial: sería un fallo de
     // corrección, no una variante. Cuando IIR no dispara, `iir_depth == depth`.
+    // EXP-0014: una búsqueda con jugada excluida no describe el nodo: no se guarda.
+    if excluded.is_some() {
+        return best_score;
+    }
     ctx.tt.store(
         board.hash,
         iir_depth,
@@ -1332,8 +1400,11 @@ fn iterative_deepening_one_thread(
     let mut last_completed_depth = 0;
 
     let mut ctx = SearchContext {
+        lmr: lmr_table(),
         stats,
         ls: LocalStats::default(),
+        excluded: [None; MAX_PLY],
+        root_depth: 1,
         ticks: 0,
         seldepth: 0,
         stop,
@@ -1357,6 +1428,7 @@ fn iterative_deepening_one_thread(
             break;
         }
         let mut pv = Vec::new();
+        ctx.root_depth = depth;
         // EXP-0005 (SEARCH-A): aspiration windows. Desde depth 5, la iteración
         // se busca con una ventana de ±ASP_DELTA alrededor del score anterior:
         // entre iteraciones consecutivas el score suele moverse poco, y una
@@ -1366,7 +1438,7 @@ fn iterative_deepening_one_thread(
         // 25 cp = un cuarto de peón: menor que la oscilación típica entre
         // iteraciones de una posición tranquila, mayor que el ruido de tempo.
         const ASP_MIN_DEPTH: i32 = 5;
-        const ASP_DELTA: i32 = 25;
+        let ASP_DELTA: i32 = tune::get(tune::ASP_DELTA);
         const ASP_MAX_DELTA: i32 = 800;
         let score = if depth >= ASP_MIN_DEPTH && best_score.abs() < MATE_SCORE - MAX_PLY as i32 {
             let mut delta = ASP_DELTA;
@@ -1425,7 +1497,7 @@ fn iterative_deepening_one_thread(
         // frente a la anterior, la posición se complica: se permite empezar otra
         // iteración hasta el 100 % del presupuesto blando en vez del 60 %
         // (el umbral se estira ×5/3; nunca más allá del plazo duro).
-        let soft = if score_drop >= TM_PANIC_DROP {
+        let soft = if score_drop >= tune::get(tune::TM_PANIC_DROP) {
             let base = limits.soft_deadline.saturating_duration_since(start);
             (start + base * 5 / 3).min(limits.hard_deadline)
         } else {

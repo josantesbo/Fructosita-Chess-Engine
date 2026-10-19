@@ -2,184 +2,60 @@
   <img src="assets/Fructosita.png" width="320" alt="Fructosita Chess Engine">
 </p>
 
-<h1 align="center">Fructosita</h1>
+# Fructosita 3.0.0
 
-<p align="center">
-  <b>An original UCI chess engine written from scratch in Rust</b><br>
-  Handcrafted evaluation · Alpha-beta search · UCI
-</p>
+**Fructosita** is an original UCI chess engine written in Rust by Antonio Espinosa. This historical release uses a handcrafted evaluation (HCE) and an alpha-beta search. The project motto is **Learn from everyone. Copy from no one.**
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-2.3.1-orange" alt="version">
-  <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
-  <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
-  <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
-  <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License">
-</p>
+This publication preserves the engine sources supplied with the original v3.0.0 release bundle. The `assets/` and `.github/` directories remain managed by the canonical GitHub repository and are not bundled in this publication workspace.
 
----
+## Changes since 2.3.1
 
-## About
+- Singular extensions with multi-cut in search (2.4.0 development step).
+- SPSA-tuned search parameters, including LMR and pruning-related parameters.
+- Selected search parameters exposed as UCI `spin` options, with the historical tuned defaults.
+- Existing correction history, persistent statistics, evaluation cache, and handcrafted king-safety and threat evaluation remain part of this release.
 
-**Fructosita** is an original UCI chess engine written from scratch in **Rust**.
+These descriptions are based on the original historical `RELEASE_NOTES.md` and supplied source code; they are not independently measured in this preparation step.
 
-Version **2.3.1** is an intermediate milestone after the 2.0.0 release. It adds search-side correction history, persistent search statistics between moves, a broader handcrafted king-attack and positional evaluation, and a persistent evaluation cache. Fructosita remains a fully **handcrafted-evaluation (HCE)** engine.
+## Validation evidence reported in the historical release
 
-The project follows a simple principle:
+- **3.0.0 vs 2.0.0:** +68.3 ± 15.3 Elo (reported 95% interval approximately +53 to +84), 1,000 games at 10+0.1 on sealed holdout openings.
+- The historical notes report 91 passing tests, perft 5/5, and no crashes, illegal moves, or time forfeits during that match.
+- Depth-10 bench: 631,758 nodes, signature `b5c6d136e9144e36`.
+- Depth-12 bench: 2,128,879 nodes, signature `b5db3356890cf707`.
 
-> **Learn from everyone. Copy from no one.**
+**Important:** The Elo and historical match-reliability claims originate from the supplied release package and have not been independently rerun. The Rust tests, perft, UCI functionality, and depth-10/depth-12 bench node counts and signatures were independently reproduced during local publication validation on 2026-10-19. The Elo figure is a relative engine-vs-engine experiment, **not an official CCRL rating**. Development-step SPRT results are not additive.
 
-Fructosita is independently implemented. Its design is informed by public chess-programming literature and research, while engine-specific source code, tuned tables, and parameter sets are not copied from other engines.
+## Build
 
-## Author
+Requires a working Rust toolchain. From the repository root:
 
-Fructosita is developed by **Antonio Espinosa**, a *Químico Farmacobiólogo* (chemist–pharmacobiologist).
-
-The project began on July 2, 2026 as a personal challenge to learn from scratch how a chess engine works. The name **Fructosita** comes from the author's undergraduate thesis work involving fructose.
-
-## Fructosita 2.3.1
-
-### Main changes since 2.0.0
-
-The supplied historical release material records:
-
-- **2.1.0 — static-evaluation correction history:** a pawn-structure keyed correction learns the systematic difference between static evaluation and search results, then refines the evaluation used by pruning decisions;
-- **2.2.0 — persistent search statistics:** history, continuation history, and correction history are retained between moves instead of being reset at every `go`; `ucinewgame` clears the retained state;
-- **2.3.0 — expanded evaluation:** safe checks, undefended king-zone squares, pawn-push threats, hanging pawns, rook behind passed pawn, minor behind pawn, pins, rook-on-queen threats, knight/pawn-count interaction, and joint re-tuning;
-- **2.3.1 — persistent evaluation cache:** the per-thread static-evaluation cache is kept between moves as a speed-only change, with identical search according to the historical release notes.
-
-## Strength evidence
-
-The supplied historical release notes report a direct development calibration match:
-
-- **Fructosita 2.3.1 vs 2.0.0: +52.5 ± 16.5 Elo**
-- **800 games**
-- **10+0.1** time control
-- development openings
-- calibration match
-
-The same material records these parent-relative development results at 5+0.05:
-
-- 2.1.0 vs parent: **+17.7 ± 13.8 Elo**
-- 2.2.0 vs parent: **+72 ± 32 Elo** — early stop
-- 2.3.0 vs parent: **+31.6 ± 21.7 Elo**
-
-These parent-relative values must **not** be added together. The direct 2.3.1-vs-2.0.0 calibration match is separate evidence.
-
-No absolute Elo rating is assigned to 2.3.1 by this publication package.
-
-## Historical measured-candidate identity
-
-The supplied release notes identify the measured candidate as **EXP-0051** and report that the 2.3.1 build differs only in its version string. They record a depth-10 bench signature of:
-
-```text
-b5c4f767593552bf
-```
-
-Publication validation should reproduce this signature before the release is finalized.
-
-## Search
-
-Fructosita 2.3.1 includes:
-
-- Principal Variation Search
-- Iterative deepening
-- Aspiration windows
-- Adaptive null-move pruning
-- Logarithmic late-move reductions
-- Reverse futility pruning
-- Futility pruning
-- Late-move pruning
-- Internal iterative reductions
-- Razoring
-- ProbCut
-- Delta pruning in quiescence
-- Static Exchange Evaluation and SEE-based capture pruning
-- Killer, history, history-malus and continuation-history heuristics
-- Pawn-structure keyed static-evaluation correction history
-- Persistent history, continuation-history and correction-history statistics between moves
-- Lock-less transposition table with aging and prefetch
-- TT probing in quiescence
-- TT-refined static evaluation
-- TT move validation/search before full move generation
-- Lazy move selection
-- Per-thread evaluation cache retained between moves
-
-## Evaluation
-
-Fructosita 2.3.1 uses a handcrafted tapered evaluation including:
-
-- Material
-- Piece-square tables with file/rank and per-square tuning
-- Safe per-piece mobility
-- Pawn structure and passed pawns
-- Blocked/free passed-pawn terms
-- King safety, king shield and pawn storm
-- King-zone attack pressure
-- Safe-check opportunities by piece type
-- Undefended king-zone squares
-- Bishop-pair bonus
-- Rook bonuses on open and semi-open files
-- Threats and hanging pieces, including hanging pawns
-- Pawn-push threats
-- Knight outposts
-- Rook behind passed pawn
-- Minor piece behind own pawn
-- Pins against the king
-- Rook-on-queen threats
-- Knight value interaction with own pawn count
-- Endgame-specific knowledge
-
-## Engine and UCI
-
-- UCI protocol
-- Lazy SMP
-- Configurable hash table
-- Configurable thread count
-- Polyglot opening-book support
-- `go nodes`
-- `go infinite` / `go ponder` stop handling
-- `ponderhit`
-- `Clear Hash`
-- Built-in `perft`
-- Built-in `bench`
-- EPD testing tools
-- Texel tuning tools
-
-## Usage
-
-Fructosita is a UCI engine and should normally be loaded into a compatible UCI chess GUI.
-
-It also provides command-line diagnostic tools:
-
-```text
-fructosita.exe
-fructosita.exe bench
-fructosita.exe perft 5
-```
-
-## Building from source
-
-A recent stable Rust toolchain is required.
-
-```bash
+```powershell
 cargo build --release --locked
+cargo test --release --locked
 ```
 
-The executable will be generated in `target/release/`.
+The engine executable is normally at `target/release/fructosita.exe` on Windows. Do not assume binary equivalence with the historical distribution until the builds are compared and validated.
 
-## Release integrity
+## Use
 
-Official release assets include a `SHA256SUMS.txt` file. Verify downloaded binaries before use when integrity matters.
+Fructosita implements the UCI protocol and can be configured in a compatible chess GUI. To launch in a terminal:
 
-## Security
+```powershell
+.\target\release\fructosita.exe
+```
 
-Fructosita is a local chess engine and is not designed to process untrusted network input. Opening books, EPD/PGN files, and other external files should nevertheless be treated as untrusted input.
+UCI commands include `uci`, `isready`, `ucinewgame`, `position startpos`, `go depth 10`, and `quit`.
 
-See [`SECURITY.md`](SECURITY.md) for reporting and safe-use guidance.
+Additional built-in diagnostics in the historical source include:
 
-## License
+```powershell
+.\target\release\fructosita.exe perft 5
+.\target\release\fructosita.exe bench depth 10
+```
 
-Fructosita is licensed under **GPL-3.0-or-later**. See [`LICENSE`](LICENSE).
+Check exact output and supported options during publication validation.
 
-© 2026 Antonio Espinosa.
+## Provenance and licensing
+
+The canonical project repository is [josantesbo/Fructosita-Chess-Engine](https://github.com/josantesbo/Fructosita-Chess-Engine). See `PROVENANCE.md` for the historical input hashes and the only publication-specific changes. The source is distributed under GPL-3.0-or-later; see `LICENSE`.

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_NAME: &str = "Fructosita 2.3.1";
+pub const ENGINE_NAME: &str = "Fructosita 3.0.0";
 pub const ENGINE_AUTHOR: &str = "Antonio Espinosa";
 const DEFAULT_HASH_MB: usize = 64;
 const DEFAULT_THREADS: usize = 1;
@@ -100,6 +100,9 @@ pub fn run() {
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
                 println!("option name Clear Hash type button");
+                for p in crate::tune::PARAMS {
+                    println!("option name {} type spin default {} min {} max {}", p.name, p.default, p.min, p.max);
+                }
                 println!("uciok");
             }
             "isready" => println!("readyok"),
@@ -212,6 +215,9 @@ fn handle_setoption(line: &str, state: &mut EngineState) {
     let name = rest[..value_pos].trim();
     let value = rest[value_pos + 7..].trim();
 
+    if crate::tune::set(name, value) {
+        return;
+    }
     if name.eq_ignore_ascii_case("Clear Hash") {
         state.tt.clear();
         return;
