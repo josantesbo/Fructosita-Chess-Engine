@@ -10,7 +10,7 @@
 use crate::board::Board;
 use crate::tune;
 use crate::eval;
-use crate::movegen::generate_legal_moves;
+use crate::movegen::{generate_legal_captures_into, generate_legal_moves, generate_legal_moves_into};
 use crate::moves::Move;
 use crate::tt::{TTFlag, TranspositionTable};
 use crate::types::{Color, PieceType};
@@ -345,6 +345,25 @@ struct SearchContext<'a> {
     /// FEN inicial) hasta el nodo actual, inclusive. Crece/decrece con la
     /// recursión: se hace push antes de bajar a un hijo y pop al volver.
     game_history: Vec<u64>,
+    /// S2-002: búferes reutilizables por ply (jugadas, puntuaciones, silenciosas
+    /// probadas, PV del hijo y lista de la quiescencia). Se toman con
+    /// `std::mem::take` y se devuelven al terminar el nodo: una llamada anidada
+    /// al mismo ply (verificación singular) recibe un búfer vacío nuevo, así que
+    /// el contenido nunca se comparte. Solo evita reservar memoria por nodo; el
+    /// orden y el árbol son idénticos.
+    move_pool: Vec<Vec<Move>>,
+    score_pool: Vec<Vec<i32>>,
+    quiet_pool: Vec<Vec<Move>>,
+    pv_pool: Vec<Vec<Move>>,
+    qs_pool: Vec<Vec<(Move, i32)>>,
+}
+
+/// S2-002: saca el búfer del ply (vacío) de su depósito.
+#[inline]
+fn take_buf<T>(pool: &mut [Vec<T>], ply: usize) -> Vec<T> {
+    let mut v = std::mem::take(&mut pool[ply]);
+    v.clear();
+    v
 }
 
 impl<'a> SearchContext<'a> {
@@ -480,7 +499,8 @@ fn score_from_tt(score: i32, ply: usize) -> i32 {
 
 fn is_repetition_or_fifty(board: &Board, ctx: &SearchContext) -> bool {
     if board.halfmove_clock >= 100 {
-        return true;
+        // A legal checkmate ends the game before the defender can claim a draw.
+        return !board.in_check(board.side_to_move) || !generate_legal_moves(board).is_empty();
     }
     let hist = &ctx.game_history;
     let len = hist.len();
@@ -566,11 +586,13 @@ fn score_moves(
     tt_move: Option<Move>,
     ply: usize,
     ctx: &SearchContext,
-) -> Vec<i32> {
+    out: &mut Vec<i32>,
+) {
     if let Some(x) = exclude {
         moves.retain(|&m| m != x);
     }
-    moves.iter().map(|m| move_score(m, board, tt_move, ply, ctx)).collect()
+    out.clear();
+    out.extend(moves.iter().map(|m| move_score(m, board, tt_move, ply, ctx)));
 }
 
 /// EXP-0013: selección perezosa. Devuelve el índice de mayor puntuación (el
@@ -601,16 +623,18 @@ fn pick_best(scores: &mut [i32]) -> Option<usize> {
 /// conjunto de jugadas devueltas son EXACTAMENTE los mismos que en v6.
 /// En jaque el SEE no se calcula (se devuelven todas las evasiones) y el
 /// acompañante es 0, valor que nunca se usa porque el delta pruning excluye jaque.
-fn filter_and_order_quiescence_moves(moves: Vec<Move>, board: &Board, in_check: bool) -> Vec<(Move, i32)> {
+fn filter_and_order_quiescence_moves(moves: &[Move], board: &Board, in_check: bool, scored: &mut Vec<(Move, i32)>) {
+    scored.clear();
     if in_check {
         // En jaque hay que considerar todas las evasiones legales, no solo
         // capturas: no podemos permitirnos descartar la única jugada legal
         // solo porque su SEE sea negativo.
-        return moves.into_iter().map(|m| (m, 0)).collect();
+        scored.extend(moves.iter().map(|&m| (m, 0)));
+        return;
     }
-    let mut scored: Vec<(Move, i32)> = moves
-        .into_iter()
-        .filter_map(|m| {
+    scored.extend(moves
+        .iter()
+        .filter_map(|&m| {
             if m.promotion() == Some(PieceType::Queen) {
                 return Some((m, i32::MAX));
             }
@@ -623,10 +647,8 @@ fn filter_and_order_quiescence_moves(moves: Vec<Move>, board: &Board, in_check: 
             } else {
                 None
             }
-        })
-        .collect();
+        }));
     scored.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
-    scored
 }
 
 fn quiescence(
@@ -686,19 +708,21 @@ fn quiescence(
     // promociones. Se genera exactamente ese subconjunto, en el mismo orden, y
     // se pasa por LA MISMA funcion de filtrado y ordenacion. En jaque el camino
     // queda intacto: hacen falta todas las evasiones.
-    let moves = if in_check {
-        let all_legal = generate_legal_moves(board);
-        if all_legal.is_empty() {
+    // S2-002: misma generación y mismo filtro/orden, sobre búferes del ply.
+    let mut gen = take_buf(&mut ctx.move_pool, ply);
+    let mut moves = take_buf(&mut ctx.qs_pool, ply);
+    if in_check {
+        generate_legal_moves_into(board, &mut gen);
+        if gen.is_empty() {
+            ctx.move_pool[ply] = gen;
+            ctx.qs_pool[ply] = moves;
             return -MATE_SCORE + ply as i32;
         }
-        filter_and_order_quiescence_moves(all_legal, board, true)
     } else {
-        filter_and_order_quiescence_moves(
-            crate::movegen::generate_legal_captures(board),
-            board,
-            false,
-        )
-    };
+        generate_legal_captures_into(board, &mut gen);
+    }
+    filter_and_order_quiescence_moves(&gen, board, in_check, &mut moves);
+    ctx.move_pool[ply] = gen;
 
     // -------------------------------------------------------------------
     // DELTA PRUNING (investigación 16), aislado.
@@ -717,7 +741,8 @@ fn quiescence(
     let delta_margin: i32 = tune::get(tune::DELTA_MARGIN);
 
     let mut best = if in_check { -INFINITY } else { alpha };
-    for (mv, see_v) in moves {
+    for k in 0..moves.len() {
+        let (mv, see_v) = moves[k];
         if !in_check
             && mv.promotion().is_none()
             && alpha > -MATE_SCORE + MAX_PLY as i32
@@ -740,6 +765,7 @@ fn quiescence(
             break;
         }
     }
+    ctx.qs_pool[ply] = moves;
     if in_check {
         best.max(alpha)
     } else {
@@ -917,7 +943,7 @@ fn negamax(
         let null_board = board.make_null_move();
         ctx.tt.prefetch(null_board.hash);
         ctx.game_history.push(null_board.hash);
-        let mut child_pv = Vec::new();
+        let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
         let score = -negamax(
             &null_board,
             depth - 1 - null_r,
@@ -927,6 +953,7 @@ fn negamax(
             &mut child_pv,
             ctx,
         );
+        ctx.pv_pool[ply + 1] = child_pv;
         ctx.game_history.pop();
         if ctx.stopped {
             return 0;
@@ -973,8 +1000,11 @@ fn negamax(
         && beta.abs() < MATE_SCORE - MAX_PLY as i32
     {
         let pc_beta = beta + PROBCUT_MARGIN;
-        let caps = crate::movegen::generate_legal_captures(board);
-        for mv in caps {
+        let mut caps = take_buf(&mut ctx.move_pool, ply);
+        generate_legal_captures_into(board, &mut caps);
+        let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
+        for k in 0..caps.len() {
+            let mv = caps[k];
             if mv.promotion().is_some() && mv.promotion() != Some(PieceType::Queen) {
                 continue;
             }
@@ -984,7 +1014,6 @@ fn negamax(
             let next = board.make_move(mv);
             ctx.tt.prefetch(next.hash);
             ctx.game_history.push(next.hash);
-            let mut child_pv = Vec::new();
             let mut v = -quiescence(&next, -pc_beta, -pc_beta + 1, ply + 1, ctx);
             if !ctx.stopped && v >= pc_beta {
                 v = -negamax(&next, depth - 4, -pc_beta, -pc_beta + 1, ply + 1, &mut child_pv, ctx);
@@ -995,9 +1024,13 @@ fn negamax(
             }
             if v >= pc_beta {
                 ctx.tt.store(board.hash, depth - 3, score_to_tt(v, ply), TTFlag::LowerBound, Some(mv));
+                ctx.move_pool[ply] = caps;
+                ctx.pv_pool[ply + 1] = child_pv;
                 return v;
             }
         }
+        ctx.move_pool[ply] = caps;
+        ctx.pv_pool[ply + 1] = child_pv;
     }
 
     // EXP-0013 (SPEED-A): la jugada de la TT se busca ANTES de generar y
@@ -1019,15 +1052,18 @@ fn negamax(
     let mut scores: Vec<i32> = Vec::new();
     let mut generated = false;
     if !LAZY_GEN || tt_first.is_none() {
-        moves = generate_legal_moves(board);
+        moves = take_buf(&mut ctx.move_pool, ply);
+        generate_legal_moves_into(board, &mut moves);
         if moves.is_empty() {
+            ctx.move_pool[ply] = moves;
             return if in_check {
                 -MATE_SCORE + ply as i32
             } else {
                 0
             };
         }
-        scores = score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx);
+        scores = take_buf(&mut ctx.score_pool, ply);
+        score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx, &mut scores);
         generated = true;
     }
 
@@ -1105,7 +1141,8 @@ fn negamax(
     // Nº de jugadas silenciosas ya buscadas en este nodo (para el umbral LMP).
     let mut quiets_searched: i32 = 0;
     // SEARCH-B: silenciosas realmente buscadas en este nodo (para el malus).
-    let mut quiets_tried: Vec<Move> = Vec::new();
+    let mut quiets_tried: Vec<Move> = take_buf(&mut ctx.quiet_pool, ply);
+    let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
 
     let mut next_index = 0usize;
     loop {
@@ -1113,8 +1150,10 @@ fn negamax(
             tt_first.unwrap()
         } else {
             if !generated {
-                moves = generate_legal_moves(board);
-                scores = score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx);
+                moves = take_buf(&mut ctx.move_pool, ply);
+                generate_legal_moves_into(board, &mut moves);
+                scores = take_buf(&mut ctx.score_pool, ply);
+                score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx, &mut scores);
                 generated = true;
             }
             match pick_best(&mut scores) {
@@ -1200,7 +1239,6 @@ fn negamax(
             ctx.move_stack[ply] = (p.kind, mv.to);
         }
         ctx.game_history.push(next.hash);
-        let mut child_pv = Vec::new();
 
         let score = if i == 0 {
             let ext = if tt_first == Some(mv) { singular_ext } else { 0 };
@@ -1274,7 +1312,7 @@ fn negamax(
             best_move = Some(mv);
             pv.clear();
             pv.push(mv);
-            pv.extend(child_pv);
+            pv.extend_from_slice(&child_pv);
         }
         if best_score > alpha {
             alpha = best_score;
@@ -1299,6 +1337,14 @@ fn negamax(
             break;
         }
     }
+
+    // S2-002: devolver los búferes del ply a sus depósitos.
+    if generated {
+        ctx.move_pool[ply] = moves;
+        ctx.score_pool[ply] = scores;
+    }
+    ctx.quiet_pool[ply] = quiets_tried;
+    ctx.pv_pool[ply + 1] = child_pv;
 
     let flag = if best_score <= alpha_orig {
         TTFlag::UpperBound
@@ -1418,6 +1464,11 @@ fn iterative_deepening_one_thread(
         move_stack: [(PieceType::Pawn, 0); MAX_PLY],
         tt,
         game_history,
+        move_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(64)).collect(),
+        score_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(64)).collect(),
+        quiet_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(64)).collect(),
+        pv_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(MAX_PLY)).collect(),
+        qs_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(32)).collect(),
     };
 
     let start = Instant::now();
@@ -1652,6 +1703,25 @@ mod tests {
             score > 300,
             "score inesperadamente bajo tras ganar una torre limpia: {score}"
         );
+    }
+
+    #[test]
+    fn mating_move_takes_precedence_over_fifty_move_draw() {
+        for clock in [99, 149] {
+            let fen = format!("6k1/5ppp/8/8/8/8/8/4R1K1 w - - {clock} 1");
+            let (mv, score) = search_fixed_depth(&fen, 4);
+            let board = Board::from_fen(&fen).unwrap();
+            let after = board.make_move(mv);
+            assert!(after.in_check(after.side_to_move));
+            assert!(generate_legal_moves(&after).is_empty(), "missed mate with clock {clock}: {mv}");
+            assert!(score >= MATE_SCORE - MAX_PLY as i32, "mate scored as {score}");
+        }
+    }
+
+    #[test]
+    fn fifty_move_draw_still_applies_when_there_is_no_mate() {
+        let (_, score) = search_fixed_depth("7k/8/8/8/8/8/8/4R1K1 w - - 99 1", 3);
+        assert_eq!(score, 0);
     }
 
     #[test]

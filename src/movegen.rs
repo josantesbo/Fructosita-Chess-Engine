@@ -192,14 +192,21 @@ fn generate_castling(board: &Board, moves: &mut Vec<Move>) {
 
 pub fn generate_pseudo_legal_moves(board: &Board) -> Vec<Move> {
     let mut moves = Vec::with_capacity(48);
-    generate_pawn_moves(board, &mut moves);
-    generate_knight_moves(board, &mut moves);
-    generate_sliding_moves(board, PieceType::Bishop, &mut moves);
-    generate_sliding_moves(board, PieceType::Rook, &mut moves);
-    generate_sliding_moves(board, PieceType::Queen, &mut moves);
-    generate_king_moves(board, &mut moves);
-    generate_castling(board, &mut moves);
+    pseudo_legal_moves_into(board, &mut moves);
     moves
+}
+
+/// S2-002: misma secuencia que `generate_pseudo_legal_moves`, escrita en un
+/// búfer del llamador (la búsqueda reutiliza uno por ply y evita reservar
+/// memoria en cada nodo). Añade al final; el llamador lo vacía antes.
+fn pseudo_legal_moves_into(board: &Board, moves: &mut Vec<Move>) {
+    generate_pawn_moves(board, moves);
+    generate_knight_moves(board, moves);
+    generate_sliding_moves(board, PieceType::Bishop, moves);
+    generate_sliding_moves(board, PieceType::Rook, moves);
+    generate_sliding_moves(board, PieceType::Queen, moves);
+    generate_king_moves(board, moves);
+    generate_castling(board, moves);
 }
 
 /// PROPUESTA 33: capturas y promociones pseudo-legales, y NADA MAS.
@@ -211,8 +218,15 @@ pub fn generate_pseudo_legal_moves(board: &Board) -> Vec<Move> {
 /// capturas es identico. `generate_castling` se omite entero: el enroque no es
 /// captura ni promocion. Verificado sobre 25.775.209 nodos sin discrepancias
 /// (`capt-02-diagnostico-fase1.md` §4).
+#[allow(dead_code)] // S2-002: la búsqueda usa la variante `_into`; se conserva para pruebas/herramientas.
 pub fn generate_pseudo_legal_captures(board: &Board) -> Vec<Move> {
     let mut moves = Vec::with_capacity(16);
+    pseudo_legal_captures_into(board, &mut moves);
+    moves
+}
+
+/// S2-002: cuerpo de `generate_pseudo_legal_captures` sobre un búfer del llamador.
+fn pseudo_legal_captures_into(board: &Board, moves: &mut Vec<Move>) {
     let us = board.side_to_move;
     let them = us.opposite();
     let occ = board.occupancy();
@@ -283,11 +297,11 @@ pub fn generate_pseudo_legal_captures(board: &Board) -> Vec<Move> {
         let to = pop_lsb(&mut targets);
         moves.push(Move::new(from, to, MoveKind::Capture));
     }
-    moves
 }
 
 /// PROPUESTA 33: capturas legales. Mismo `LegalityContext` de la inv. 30, sin
 /// tocarlo, y el filtro en el mismo sitio de la misma cadena.
+#[allow(dead_code)] // S2-002: ídem.
 pub fn generate_legal_captures(board: &Board) -> Vec<Move> {
     let ctx = LegalityContext::new(board);
     generate_pseudo_legal_captures(board)
@@ -309,6 +323,23 @@ pub fn generate_legal_moves(board: &Board) -> Vec<Move> {
         .into_iter()
         .filter(|&mv| ctx.is_legal(board, mv))
         .collect()
+}
+
+/// S2-002: `generate_legal_moves` sobre un búfer reutilizable. `retain`
+/// conserva el orden relativo, igual que `filter` + `collect`: misma secuencia.
+pub fn generate_legal_moves_into(board: &Board, moves: &mut Vec<Move>) {
+    moves.clear();
+    pseudo_legal_moves_into(board, moves);
+    let ctx = LegalityContext::new(board);
+    moves.retain(|&mv| ctx.is_legal(board, mv));
+}
+
+/// S2-002: `generate_legal_captures` sobre un búfer reutilizable.
+pub fn generate_legal_captures_into(board: &Board, moves: &mut Vec<Move>) {
+    moves.clear();
+    pseudo_legal_captures_into(board, moves);
+    let ctx = LegalityContext::new(board);
+    moves.retain(|&mv| ctx.is_legal(board, mv));
 }
 
 /// Datos de legalidad del nodo. Se calculan UNA vez por llamada a

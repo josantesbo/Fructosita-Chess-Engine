@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.1.0 — Faster search, same tree (2026-09-30)
+
+- **Per-ply search buffers:** move lists and other per-node buffers are reused ply by ply instead of being rebuilt. The search tree is identical to 3.0.0 (same bench signatures) with about 12% less time per search.
+- **Fix:** a checkmate delivered when the fifty-move counter reaches its limit is scored as mate, not as a draw.
+
+Evidence:
+
+- Development SPRT vs 3.0.0 (5+0.05): **+24.3 ± 13.4 Elo**, H1 accepted, 1,162 games.
+- Development calibration vs 3.0.0 (10+0.1): +20.0 ± 15.7 Elo, 800 games.
+- **Sealed holdout vs 3.0.0: +21.6 ± 14.4 Elo** (95% CI ≈ +7 to +36), 1,000 games at 10+0.1 on reserved openings never used during development (+284 −222 =494); 0 time forfeits, 0 illegal moves, 0 crashes.
+
+Bench signatures: depth 10 `b5c6d136e9144e36`; depth 12 `b5db3356890cf707`. Windows x64.
+
 ## 3.0.0 — Singular search extensions and SPSA-tuned parameters (2026)
 
 - Adds singular extensions with multi-cut (historical 2.4.0 development step).
