@@ -1,50 +1,96 @@
 <p align="center">
-  <img src="assets/Fructosita.png" width="320" alt="Fructosita Chess Engine">
+  <img src="assets/Fructosita.png" width="360" alt="Fructosita Chess Engine">
 </p>
 
-# Fructosita 3.1.0
+<h1 align="center">Fructosita</h1>
 
-**Fructosita** is an original UCI chess engine written in Rust by Antonio Espinosa. This release uses a handcrafted evaluation (HCE) and an alpha-beta search. The project motto is **Learn from everyone. Copy from no one.**
+<p align="center">
+  <b>An original UCI chess engine written from scratch in Rust</b><br>
+  Handcrafted evaluation · Modern alpha-beta search · Every change measured
+</p>
 
-Fructosita 3.1.0 searches exactly the same tree as 3.0.0 about 12% faster, and fixes the scoring of a checkmate delivered on the fifty-move boundary. The `assets/` and `.github/` directories remain managed by the canonical GitHub repository and are not bundled in this publication workspace.
+<p align="center">
+  <img src="https://img.shields.io/badge/version-3.2.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
+  <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
+  <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
+  <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License">
+</p>
 
-## Changes since 3.0.0
+---
 
-- **Per-ply search buffers:** move lists and other per-node buffers are reused ply by ply instead of being rebuilt. The search tree is identical to 3.0.0 (same bench signatures) with about 12% less time per search.
-- **Fix:** a checkmate delivered when the fifty-move counter reaches its limit is scored as mate, not as a draw.
+## About
 
-## Validation evidence
+**Fructosita** is an open-source chess engine written entirely from scratch in **Rust**. No code, tables or weights were copied from any other engine: every idea comes from public literature (the Chess Programming Wiki, research papers) and was implemented, tuned and measured specifically for Fructosita.
 
-- Development SPRT vs 3.0.0 (5+0.05): **+24.3 ± 13.4 Elo**, H1 accepted, 1,162 games.
-- Development calibration vs 3.0.0 (10+0.1): +20.0 ± 15.7 Elo, 800 games.
-- **Sealed holdout vs 3.0.0: +21.6 ± 14.4 Elo** (95% CI ≈ +7 to +36), 1,000 games at 10+0.1 on reserved openings never used during development (+284 −222 =494); 0 time forfeits, 0 illegal moves, 0 crashes.
+The project follows one rule, **learn from everyone, copy from no one**, and a second one: **no change is kept without evidence**. Every improvement is tested against its parent, and every version that claims more strength is checked on openings that were never used while developing it.
 
-**Important:** the match results above come from the project's development records. During local publication validation on 2026-10-19, this publication tree compiled with `cargo build --release --locked` (Rust 1.96.1); all 93 Rust tests passed; perft 5 from the start position gave 4,865,609 nodes; UCI initialisation (`id name Fructosita 3.1.0`, `uciok`, `readyok`) and a depth-6 search succeeded; and the depth-10 and depth-12 bench signatures (`b5c6d136e9144e36`, 631,758 nodes; `b5db3356890cf707`, 2,128,879 nodes) matched the signatures recorded for the released executable. The historical match results were not rerun. Elo figures are relative engine-vs-engine experiments, **not official CCRL ratings**. Development-step SPRT results are not additive.
+## The author
 
-## Requirements
+Fructosita is created by **Antonio Espinosa**, a **chemist and pharmacobiologist** (*Químico Farmacobiólogo*).
+The project started on **July 2, 2026** as a personal challenge: to learn, from zero, how a chess engine thinks.
 
-Windows x64. The engine identifies itself as `id name Fructosita 3.1.0`.
+The name comes from the author's undergraduate thesis on **fructose**. That little molecule became the engine's
+identity and its logo: a king merging into a hexagonal ring, where chess meets chemistry.
 
-## Build
+> *Fructosita nació como un reto personal de un químico farmacobiólogo: aprender desde cero cómo piensa un motor
+> de ajedrez. El nombre viene de mi tesis de licenciatura sobre la fructosa.* (Antonio Espinosa)
 
-Requires a working Rust toolchain. From the repository root:
+## Fructosita 3.2.0
 
-```powershell
-cargo build --release --locked
-cargo test --release --locked
-```
+Fructosita 3.2.0 runs about 1.3 times as many nodes per second with the same tree, adds three small search refinements and now needs a CPU with POPCNT.
 
-The engine executable is normally at `target/release/fructosita.exe` on Windows.
+### What's new since 3.1.0
 
-## Use
+- Speed with an identical tree (about 23% less time per position): a move is made only after it survives pruning, check squares are computed once per node, the move picker sorts once, the evaluation counts bits with the POPCNT instruction and uses pre-summed tables, and SEE updates the attackers instead of recomputing them.
+- Search: the transposition table keeps a position's good move when the new entry is only an upper bound; late-move reductions take the move's history into account; the engine allows one more iteration when the best move has just changed.
+- New requirement: a CPU with POPCNT (any x86-64 since 2008). On an older CPU the engine prints a message and exits.
 
-Fructosita implements the UCI protocol and can be loaded in any compatible GUI or tournament manager. To launch in a terminal:
+### Evidence
 
-```powershell
-.\target\release\fructosita.exe
-```
+- Sealed holdout vs 3.1.0: **+62.5 ± 13.9 Elo** (95% CI about +48.6 to +76.5), 1,000 games at 10+0.1 (+350 −172 =478). No time forfeits, illegal moves or errors.
+- During development, at 5+0.05 with one thread and 64 MB hash: the speed changes passed SPRT with +49.9 ± 19.2 Elo in 526 games, the search changes with +14.7 ± 9.8 Elo in 2,084 games.
 
-Main UCI options:
+## Strength
+
+| Version | Measured against | Result | Conditions |
+|---|---|---|---|
+| 1.3.4 |  | Submitted to **CCRL** |  |
+| 1.7.0 | 1.3.4 | **+146 Elo** (95% CI +131 to +162) | 1,400 fresh games |
+| 2.0.0 | 1.7.0 | **+239 ± 23 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
+| 3.0.0 | 2.0.0 | **+68.3 ± 15.3 Elo** (95% CI about +53 to +84) | 1,000 games, 10+0.1, **sealed holdout openings** |
+| 3.1.0 | 3.0.0 | **+21.6 ± 14.4 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
+| 3.2.0 | 3.1.0 | **+62.5 ± 13.9 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
+
+Self-play Elo overstates the gap seen in rating lists; independent ratings (CCRL) are the reference.
+
+## Features
+
+**Search**
+- Principal Variation Search, iterative deepening, aspiration windows
+- Transposition table: lock-less, 16-byte entries, prefetch; TT move tried before move generation; a good move is kept when only an upper bound is stored
+- Null-move pruning (adaptive), reverse futility, futility, razoring, ProbCut, late-move pruning, SEE pruning
+- Logarithmic late-move reductions (also guided by the move's history), internal iterative reductions, check and **singular extensions**
+- History and continuation history, killers, **static-evaluation correction history**
+- Search statistics **persist between moves** (history, correction and evaluation caches)
+- Lazy SMP, time management with panic time on score drops
+
+**Evaluation (handcrafted, Texel-tuned)**
+- Tapered material and piece-square tables (formula plus tuned per-file, per-rank and per-square corrections)
+- Safe mobility per piece, threats, hanging pieces and pawns, pawn-push threats, pins
+- King safety: attack units, king shield, **safe checks**, weak king-zone squares
+- Pawn structure: doubled, isolated, passed pawns (blocked or free, king race, rook behind)
+- Outposts, bishop pair, rooks on open files, endgame scaling (insufficient material, opposite bishops, mop-up)
+
+**Engine**
+- UCI: `Hash`, `Threads`, `OwnBook`, `BookFile`, `Clear Hash`, `go infinite/ponder/nodes/depth/movetime`
+- Polyglot opening book support
+- Built-in tools: `perft`, `bench`, EPD test harness, Texel tuner
+
+## Usage
+
+Fructosita is a UCI engine: load the executable in any UCI GUI (Arena, Cute Chess, Banksia GUI, ChessBase, ...).
+It identifies itself as `id name Fructosita 3.2.0`.
 
 | Option | Default | Notes |
 |---|---|---|
@@ -52,17 +98,43 @@ Main UCI options:
 | `Threads` | 1 | Lazy SMP |
 | `OwnBook` | true | Only used when `BookFile` is set (Polyglot book); no file, no book |
 | `BookFile` | empty | Path of a Polyglot book |
-| `Clear Hash` | - | Button |
+| `Clear Hash` |  | Button |
 
-Other options (`RfpMargin`, `LmrBase`, ...) are internal search parameters exposed for tuning; leave them at their defaults. Built-in diagnostics:
+Other options (`RfpMargin`, `LmrBase`, ...) are internal search parameters exposed for testing and tuning; leave them at their defaults.
 
-```powershell
-.\target\release\fructosita.exe perft 5
-.\target\release\fructosita.exe bench depth 12
+```
+fructosita.exe              # UCI mode
+fructosita.exe bench        # deterministic benchmark (node count and signature)
+fructosita.exe perft 5      # move-generator self-check
 ```
 
-`bench depth 12` must end with `bench signature b5db3356890cf707`.
+`fructosita.exe bench depth 12` ends with `bench signature b5d576af5da807d9`.
 
-## Provenance and licensing
+## Building
 
-The canonical project repository is [josantesbo/Fructosita-Chess-Engine](https://github.com/josantesbo/Fructosita-Chess-Engine). See `PROVENANCE.md` for the input hashes and the only publication-specific changes. The source is distributed under GPL-3.0-or-later; see `LICENSE`.
+```
+cargo build --release --locked
+cargo test --release --locked
+```
+
+The binary is written to `target/release/fructosita(.exe)`. Requires a recent stable Rust toolchain.
+
+`.cargo/config.toml` enables POPCNT.
+
+## Requirements
+
+Windows x64 and a CPU with POPCNT (any x86-64 since 2008). On a CPU without POPCNT the engine prints a message and exits.
+
+## Version history
+
+See the **Releases** page for binaries, source archives and SHA-256 checksums of every published version, and
+`CHANGELOG.md` for the complete list of internal steps and their measurements.
+
+## Security
+
+Fructosita is a local engine and does not process network input. Opening books, EPD and PGN files from unknown
+sources should still be treated as untrusted. See [`SECURITY.md`](SECURITY.md).
+
+## License
+
+GPL-3.0-or-later. See [`LICENSE`](LICENSE). © 2026 Antonio Espinosa.

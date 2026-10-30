@@ -40,7 +40,24 @@ mod zobrist;
 
 use std::env;
 
+/// S3-002: el binario se compila con POPCNT por hardware (ver `.cargo/config.toml`).
+/// Todo x86-64 desde 2008 lo tiene; en uno anterior se avisa en vez de fallar
+/// con una instrucción ilegal.
+#[cfg(all(target_arch = "x86_64", target_feature = "popcnt"))]
+fn require_popcnt() {
+    // CPUID hoja 1, ECX bit 23.
+    let has = (std::arch::x86_64::__cpuid(1).ecx >> 23) & 1 == 1;
+    if !has {
+        eprintln!("Fructosita: esta compilación necesita una CPU con POPCNT (x86-64 de 2008 o posterior).");
+        std::process::exit(1);
+    }
+}
+
+#[cfg(not(all(target_arch = "x86_64", target_feature = "popcnt")))]
+fn require_popcnt() {}
+
 fn main() {
+    require_popcnt();
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(String::as_str) {

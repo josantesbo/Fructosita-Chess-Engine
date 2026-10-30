@@ -352,10 +352,14 @@ struct SearchContext<'a> {
     /// el contenido nunca se comparte. Solo evita reservar memoria por nodo; el
     /// orden y el árbol son idénticos.
     move_pool: Vec<Vec<Move>>,
-    score_pool: Vec<Vec<i32>>,
+    score_pool: Vec<Vec<i64>>,
     quiet_pool: Vec<Vec<Move>>,
     pv_pool: Vec<Vec<Move>>,
     qs_pool: Vec<Vec<(Move, i32)>>,
+    /// S3-002: "¿está en jaque el bando al turno?" ya calculado por el llamador
+    /// para el nodo que se va a visitar. Se fija justo antes de la llamada y el
+    /// nodo lo consume en su primera instrucción: nunca queda un valor viejo.
+    check_hint: Option<bool>,
 }
 
 /// S2-002: saca el búfer del ply (vacío) de su depósito.
@@ -577,6 +581,41 @@ fn move_score(
     }
 }
 
+/// S2-009: "¿da jaque?" calculado una vez por jugada y solo si hace falta.
+#[inline]
+fn gives_check_cached(
+    cache: &mut Option<bool>,
+    info: &mut Option<crate::board::CheckInfo>,
+    board: &Board,
+    mv: Move,
+) -> bool {
+    // S3-002: las casillas de jaque del nodo se calculan una vez (perezoso) y
+    // cada jugada se resuelve con dos AND; solo los casos raros usan el camino exacto.
+    *cache.get_or_insert_with(|| {
+        let ci = info.get_or_insert_with(|| board.check_info());
+        board.gives_check_with(mv, ci)
+    })
+}
+
+/// S2-003: umbral de historial "bueno" para reducir menos (medido, ver LMR).
+const LMR_HIST_GOOD: i32 = 1_000;
+
+/// S2-003: la misma puntuación que `move_score` da a una silenciosa que no es
+/// killer ni jugada de la TT (historial mariposa combinado con continuation
+/// history). La lista ya consumió su puntuación en la selección perezosa.
+fn quiet_order_score(mv: &Move, board: &Board, ply: usize, ctx: &SearchContext) -> i32 {
+    let h = ctx.hist.butterfly[board.side_to_move.index()][mv.from as usize][mv.to as usize];
+    if !ENABLE_CONT_HISTORY {
+        return h;
+    }
+    let piece = match board.mailbox[mv.from as usize] {
+        Some(p) => p.kind,
+        None => return h,
+    };
+    let ch = ctx.cont_history_score(ply, piece, mv.to);
+    (h + (ch * CONT_HISTORY_SCALE).min(1_000_000)) / 2
+}
+
 /// EXP-0013: quita de la lista la jugada que ya se buscó primero (la de la
 /// TT) y puntúa el resto con `move_score`.
 fn score_moves(
@@ -586,31 +625,68 @@ fn score_moves(
     tt_move: Option<Move>,
     ply: usize,
     ctx: &SearchContext,
-    out: &mut Vec<i32>,
+    out: &mut Vec<i64>,
 ) {
     if let Some(x) = exclude {
         moves.retain(|&m| m != x);
     }
     out.clear();
-    out.extend(moves.iter().map(|m| move_score(m, board, tt_move, ply, ctx)));
+    // S3-002: clave = puntuación * 256 + (255 − índice). El máximo de la clave es
+    // la mayor puntuación y, en empate, el menor índice: el mismo orden que la
+    // selección anterior (máximo, primero en caso de empate). Hay <= 218 jugadas.
+    out.extend(
+        moves
+            .iter()
+            .enumerate()
+            .map(|(j, m)| (move_score(m, board, tt_move, ply, ctx) as i64) * 256 + (255 - j as i64)),
+    );
 }
 
-/// EXP-0013: selección perezosa. Devuelve el índice de mayor puntuación (el
-/// primero en caso de empate, igual que la ordenación estable anterior) y lo
-/// marca como usado. `i32::MIN` nunca es una puntuación real.
-fn pick_best(scores: &mut [i32]) -> Option<usize> {
-    let mut best = None;
-    let mut best_score = i32::MIN;
-    for (j, &sc) in scores.iter().enumerate() {
-        if sc > best_score {
-            best_score = sc;
-            best = Some(j);
+/// EXP-0013: selección perezosa (máximo, el primero en caso de empate).
+/// S3-002: híbrida. Las primeras jugadas se eligen recorriendo las claves (en un
+/// nodo de corte bastan una o dos); a partir de la cuarta, el resto se ordena
+/// UNA vez de mayor a menor y se consume en secuencia. Con claves distintas
+/// (el índice va dentro) el orden es exactamente el de la selección repetida.
+/// `i64::MIN` marca una clave ya usada y nunca es una clave real.
+#[derive(Default)]
+struct Picker {
+    picks: u32,
+    sorted: bool,
+    pos: usize,
+}
+
+const PICK_SCANS: u32 = 3;
+
+#[inline]
+fn pick_next(keys: &mut [i64], st: &mut Picker) -> Option<usize> {
+    if !st.sorted {
+        if st.picks < PICK_SCANS {
+            st.picks += 1;
+            let mut best = i64::MIN;
+            let mut at = 0usize;
+            for (j, &k) in keys.iter().enumerate() {
+                if k > best {
+                    best = k;
+                    at = j;
+                }
+            }
+            if best == i64::MIN {
+                return None;
+            }
+            keys[at] = i64::MIN;
+            return Some(255 - (best & 255) as usize);
         }
+        keys.sort_unstable_by(|a, b| b.cmp(a));
+        st.sorted = true;
+        st.pos = 0;
     }
-    if let Some(j) = best {
-        scores[j] = i32::MIN;
+    match keys.get(st.pos) {
+        Some(&k) if k != i64::MIN => {
+            st.pos += 1;
+            Some(255 - (k & 255) as usize)
+        }
+        _ => None,
     }
-    best
 }
 
 /// Filtra y ordena las capturas candidatas de quiescence usando SEE: las
@@ -658,6 +734,7 @@ fn quiescence(
     ply: usize,
     ctx: &mut SearchContext,
 ) -> i32 {
+    let check_hint = ctx.check_hint.take();
     ctx.check_time();
     if ctx.stopped {
         return 0;
@@ -684,7 +761,7 @@ fn quiescence(
         }
     }
 
-    let in_check = board.in_check(board.side_to_move);
+    let in_check = check_hint.unwrap_or_else(|| board.in_check(board.side_to_move));
     let stand_pat = if !in_check || ply >= MAX_PLY {
         let raw = cached_eval(board, ctx);
         corrected_eval(board, raw, ctx)
@@ -751,6 +828,8 @@ fn quiescence(
             continue;
         }
         let next = board.make_move(mv);
+        // S3-002: adelantar la entrada de la TT que el hijo consultará.
+        ctx.tt.prefetch(next.hash);
         let score = -quiescence(&next, -beta, -alpha, ply + 1, ctx);
         if ctx.stopped {
             return 0;
@@ -783,6 +862,7 @@ fn negamax(
     pv: &mut Vec<Move>,
     ctx: &mut SearchContext,
 ) -> i32 {
+    let check_hint = ctx.check_hint.take();
     pv.clear();
 
     ctx.check_time();
@@ -797,13 +877,14 @@ fn negamax(
         return cached_eval(board, ctx);
     }
 
-    let in_check = board.in_check(board.side_to_move);
+    let in_check = check_hint.unwrap_or_else(|| board.in_check(board.side_to_move));
     let mut depth = depth;
     if in_check {
         depth += 1;
     }
 
     if depth <= 0 {
+        ctx.check_hint = Some(in_check);
         return quiescence(board, alpha, beta, ply, ctx);
     }
 
@@ -977,6 +1058,7 @@ fn negamax(
         && alpha.abs() < MATE_SCORE - MAX_PLY as i32
         && static_eval + RAZOR_MARGIN * depth < alpha
     {
+        ctx.check_hint = Some(false);
         let q = quiescence(board, alpha, alpha + 1, ply, ctx);
         if ctx.stopped {
             return 0;
@@ -1049,7 +1131,7 @@ fn negamax(
         })
     };
     let mut moves: Vec<Move> = Vec::new();
-    let mut scores: Vec<i32> = Vec::new();
+    let mut scores: Vec<i64> = Vec::new();
     let mut generated = false;
     if !LAZY_GEN || tt_first.is_none() {
         moves = take_buf(&mut ctx.move_pool, ply);
@@ -1145,6 +1227,9 @@ fn negamax(
     let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
 
     let mut next_index = 0usize;
+    let mut check_info: Option<crate::board::CheckInfo> = None;
+    // S3-002: selección híbrida (ver `pick_next`).
+    let mut picker = Picker::default();
     loop {
         let mv = if next_index == 0 && tt_first.is_some() {
             tt_first.unwrap()
@@ -1156,15 +1241,16 @@ fn negamax(
                 score_moves(&mut moves, excluded.or(tt_first), board, tt_move, ply, ctx, &mut scores);
                 generated = true;
             }
-            match pick_best(&mut scores) {
+            match pick_next(&mut scores, &mut picker) {
                 Some(j) => moves[j],
                 None => break,
             }
         };
         let i = next_index;
         next_index += 1;
-        let next = board.make_move(mv);
-        ctx.tt.prefetch(next.hash);
+        // S2-009: la jugada solo se ejecuta si sobrevive a las podas; "da jaque"
+        // se calcula sin copiar el tablero y una sola vez (perezoso).
+        let mut gc: Option<bool> = None;
         let is_quiet = !mv.is_capture() && mv.promotion().is_none();
 
         // SEARCH-B: poda SEE de capturas perdedoras cerca de las hojas. En
@@ -1181,7 +1267,7 @@ fn negamax(
             && mv.is_capture()
             && mv.promotion().is_none()
             && alpha > -MATE_SCORE + MAX_PLY as i32
-            && !next.in_check(next.side_to_move)
+            && !gives_check_cached(&mut gc, &mut check_info, board, mv)
             && crate::see::see(board, &mv) < -SEE_PRUNE_MARGIN * depth
         {
             continue;
@@ -1195,11 +1281,10 @@ fn negamax(
             && depth <= FUTILITY_MAX_DEPTH
             && alpha > -MATE_SCORE + MAX_PLY as i32
             && is_quiet
-            && !next.in_check(next.side_to_move)
         {
             let margin = FUTILITY_BASE + FUTILITY_STEP * depth
                 - if improving { 0 } else { FUTILITY_IMPROVING_BONUS };
-            if static_eval + margin <= alpha {
+            if static_eval + margin <= alpha && !gives_check_cached(&mut gc, &mut check_info, board, mv) {
                 continue;
             }
         }
@@ -1216,7 +1301,7 @@ fn negamax(
             && alpha > -MATE_SCORE + MAX_PLY as i32
             && is_quiet
             && quiets_searched >= lmp_count
-            && !next.in_check(next.side_to_move)
+            && !gives_check_cached(&mut gc, &mut check_info, board, mv)
         {
             ctx.ls.lmp_prunes += 1;
             let f_margin = FUTILITY_BASE + FUTILITY_STEP * depth
@@ -1230,6 +1315,9 @@ fn negamax(
             continue;
         }
 
+        let next = board.make_move(mv);
+        ctx.tt.prefetch(next.hash);
+
         if is_quiet {
             quiets_searched += 1;
             quiets_tried.push(mv);
@@ -1242,6 +1330,7 @@ fn negamax(
 
         let score = if i == 0 {
             let ext = if tt_first == Some(mv) { singular_ext } else { 0 };
+            ctx.check_hint = gc;
             -negamax(&next, iir_depth - 1 + ext, -beta, -alpha, ply + 1, &mut child_pv, ctx)
         } else {
             // EXP-0005 (SEARCH-A): LMR logarítmica (ver `lmr_table`). Se aplica
@@ -1256,7 +1345,7 @@ fn negamax(
                 && i >= lmr_min_index
                 && is_quiet
                 && !in_check
-                && !next.in_check(next.side_to_move)
+                && !gives_check_cached(&mut gc, &mut check_info, board, mv)
             {
                 ctx.ls.lmr_attempts += 1;
                 let mut r = ctx.lmr[(depth as usize).min(63)][i.min(63)];
@@ -1266,13 +1355,29 @@ fn negamax(
                 if is_pv {
                     r -= 1;
                 }
-                if ctx.killers[ply][0] == Some(mv) || ctx.killers[ply][1] == Some(mv) {
+                let is_killer = ctx.killers[ply][0] == Some(mv) || ctx.killers[ply][1] == Some(mv);
+                if is_killer {
                     r -= 1;
+                } else {
+                    // S2-003: la puntuación de ordenación de la silenciosa
+                    // (historial mariposa + continuation history) predice si la
+                    // búsqueda reducida fallará alto: medido en 120 posiciones
+                    // DEV a d11, 0,7 % con puntuación negativa (60 % de las
+                    // jugadas reducidas) frente a 3,4 % en [100, 1000) y 5,5 %
+                    // en [1000, 10000). Una unidad más de reducción cuando el
+                    // historial es negativo, una menos cuando es >= 1000.
+                    let hs = quiet_order_score(&mv, board, ply, ctx);
+                    if hs < 0 {
+                        r += 1;
+                    } else if hs >= LMR_HIST_GOOD {
+                        r -= 1;
+                    }
                 }
                 r.clamp(0, (iir_depth - 2).max(0))
             } else {
                 0
             };
+            ctx.check_hint = gc;
             let mut s = -negamax(
                 &next,
                 iir_depth - 1 - reduction,
@@ -1284,6 +1389,7 @@ fn negamax(
             );
             if !ctx.stopped && s > alpha && reduction > 0 {
                 ctx.ls.lmr_researches += 1;
+                ctx.check_hint = gc;
                 s = -negamax(
                     &next,
                     iir_depth - 1,
@@ -1296,6 +1402,7 @@ fn negamax(
             }
             if !ctx.stopped && s > alpha && s < beta {
                 ctx.ls.pvs_researches += 1;
+                ctx.check_hint = gc;
                 s = -negamax(&next, iir_depth - 1, -beta, -alpha, ply + 1, &mut child_pv, ctx);
             }
             s
@@ -1469,11 +1576,14 @@ fn iterative_deepening_one_thread(
         quiet_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(64)).collect(),
         pv_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(MAX_PLY)).collect(),
         qs_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(32)).collect(),
+        check_hint: None,
     };
 
     let start = Instant::now();
     let mut depth = 1;
     let mut score_drop = 0i32;
+    // S2-010: ¿cambió la mejor jugada en la última iteración completada?
+    let mut best_changed = false;
     loop {
         if depth > limits.max_depth {
             break;
@@ -1520,6 +1630,7 @@ fn iterative_deepening_one_thread(
 
         if completed || depth == 1 {
             if !pv.is_empty() {
+                best_changed = completed && depth >= 6 && pv[0] != best_move;
                 best_move = pv[0];
                 // TM-04: caída del score frente a la iteración completada anterior.
                 if completed && depth >= 6 {
@@ -1551,6 +1662,13 @@ fn iterative_deepening_one_thread(
         let soft = if score_drop >= tune::get(tune::TM_PANIC_DROP) {
             let base = limits.soft_deadline.saturating_duration_since(start);
             (start + base * 5 / 3).min(limits.hard_deadline)
+        } else if best_changed {
+            // S2-010: la mejor jugada acaba de cambiar: la posición no está
+            // resuelta. Se permite empezar otra iteración hasta 4/3 del umbral
+            // (nunca más allá del plazo duro). Sin recorte en jugadas estables
+            // (la causa probable del fracaso de TM-03 en el reto 24H).
+            let base = limits.soft_deadline.saturating_duration_since(start);
+            (start + base * 4 / 3).min(limits.hard_deadline)
         } else {
             limits.soft_deadline
         };

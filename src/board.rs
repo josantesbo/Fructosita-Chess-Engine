@@ -40,6 +40,13 @@ pub struct Board {
     pub hash: u64,
 }
 
+/// S3-002: ver `Board::check_info`.
+pub struct CheckInfo {
+    /// Por tipo de pieza (peón, caballo, alfil, torre, dama, rey).
+    squares: [Bitboard; 6],
+    blockers: Bitboard,
+}
+
 impl Board {
     pub fn start_pos() -> Board {
         Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
@@ -273,6 +280,106 @@ impl Board {
         self.is_square_attacked(self.king_square(color), color.opposite())
     }
 
+    /// S2-009: ¿la jugada (legal) deja al rival en jaque? Equivale exactamente a
+    /// `self.make_move(mv).in_check(rival)` sin copiar el tablero: jaque directo
+    /// de la pieza que llega (o de la pieza promovida) y jaque descubierto de un
+    /// deslizante propio con la ocupación actualizada. Enroque y captura al paso
+    /// (dos casillas se vacían o se mueve una torre) usan el camino exacto.
+    pub fn gives_check(&self, mv: Move) -> bool {
+        let us = self.side_to_move;
+        let them = us.opposite();
+        if matches!(mv.kind, MoveKind::CastleKingside | MoveKind::CastleQueenside | MoveKind::EnPassantCapture) {
+            return self.make_move(mv).in_check(them);
+        }
+        let t = tables();
+        let ksq = self.king_square(them);
+        let kbb = 1u64 << ksq;
+        let from_bb = 1u64 << mv.from;
+        let occ = (self.occupancy() & !from_bb) | (1u64 << mv.to);
+        let piece = match mv.promotion() {
+            Some(p) => p,
+            None => match self.mailbox[mv.from as usize] {
+                Some(p) => p.kind,
+                None => return self.make_move(mv).in_check(them),
+            },
+        };
+        let direct = match piece {
+            PieceType::Pawn => t.pawn_attacks(us, mv.to),
+            PieceType::Knight => t.knight_attacks(mv.to),
+            PieceType::Bishop => t.bishop_attacks(mv.to, occ),
+            PieceType::Rook => t.rook_attacks(mv.to, occ),
+            PieceType::Queen => t.queen_attacks(mv.to, occ),
+            PieceType::King => EMPTY,
+        };
+        if direct & kbb != EMPTY {
+            return true;
+        }
+        let own = &self.pieces[us.index()];
+        let queens = own[PieceType::Queen.index()];
+        let bq = (own[PieceType::Bishop.index()] | queens) & !from_bb;
+        let rq = (own[PieceType::Rook.index()] | queens) & !from_bb;
+        (t.bishop_attacks(ksq, occ) & bq) | (t.rook_attacks(ksq, occ) & rq) != EMPTY
+    }
+
+    /// S3-002: datos de jaque del nodo para el bando al turno, calculados una vez:
+    /// casillas desde las que cada tipo de pieza daría jaque directo al rey rival
+    /// (con la ocupación actual) y piezas que son el único obstáculo entre un
+    /// deslizante propio y ese rey (candidatas a jaque descubierto).
+    pub fn check_info(&self) -> CheckInfo {
+        let t = tables();
+        let us = self.side_to_move;
+        let them = us.opposite();
+        let ksq = self.king_square(them);
+        let occ = self.occupancy();
+        let b = t.bishop_attacks(ksq, occ);
+        let r = t.rook_attacks(ksq, occ);
+        let own = &self.pieces[us.index()];
+        let queens = own[PieceType::Queen.index()];
+        let mut snipers = (t.bishop_attacks(ksq, EMPTY) & (own[PieceType::Bishop.index()] | queens))
+            | (t.rook_attacks(ksq, EMPTY) & (own[PieceType::Rook.index()] | queens));
+        let mut blockers = EMPTY;
+        if snipers != EMPTY {
+            let between = &crate::movegen::between_table()[ksq as usize];
+            while snipers != EMPTY {
+                let s = snipers.trailing_zeros() as usize;
+                snipers &= snipers - 1;
+                let btw = between[s] & occ;
+                if btw != EMPTY && btw & (btw - 1) == EMPTY {
+                    blockers |= btw;
+                }
+            }
+        }
+        CheckInfo {
+            squares: [t.pawn_attacks(them, ksq), t.knight_attacks(ksq), b, r, b | r, EMPTY],
+            blockers,
+        }
+    }
+
+    /// S3-002: igual que `gives_check` (mismo resultado para toda jugada legal),
+    /// usando los datos del nodo. Jaque directo: la casilla de destino está entre
+    /// las de jaque de la pieza (para un deslizante la ocupación actual basta: si
+    /// el origen fuera el único obstáculo entre destino y rey, la pieza ya estaría
+    /// dando jaque, imposible con el turno propio). Jaque descubierto: solo si la
+    /// pieza que sale es un obstáculo único; ese caso, las promociones, el enroque
+    /// y la captura al paso se resuelven con el camino exacto.
+    #[inline]
+    pub fn gives_check_with(&self, mv: Move, ci: &CheckInfo) -> bool {
+        if !matches!(mv.kind, MoveKind::Quiet | MoveKind::DoublePawnPush | MoveKind::Capture) {
+            return self.gives_check(mv);
+        }
+        let piece = match self.mailbox[mv.from as usize] {
+            Some(p) => p.kind,
+            None => return self.gives_check(mv),
+        };
+        if ci.squares[piece.index()] & (1u64 << mv.to) != EMPTY {
+            return true;
+        }
+        if ci.blockers & (1u64 << mv.from) != EMPTY {
+            return self.gives_check(mv);
+        }
+        false
+    }
+
     /// Aplica `mv` y devuelve el tablero resultante. Asume que `mv` es al
     /// menos pseudo-legal en `self` (no valida legalidad por jaque; eso lo
     /// hace el generador de movimientos llamando a `in_check` después).
@@ -458,6 +565,43 @@ impl std::fmt::Display for Board {
         }
         writeln!(f, "    a b c d e f g h")?;
         write!(f, "  FEN: {}", self.to_fen())
+    }
+}
+
+#[cfg(test)]
+mod gives_check_tests {
+    use super::*;
+    use crate::movegen::generate_legal_moves;
+
+    fn walk(b: &Board, depth: u32, n: &mut u64) {
+        let ci = b.check_info();
+        for mv in generate_legal_moves(b) {
+            let next = b.make_move(mv);
+            assert_eq!(b.gives_check(mv), next.in_check(next.side_to_move), "{mv} en {}", b);
+            assert_eq!(b.gives_check_with(mv, &ci), next.in_check(next.side_to_move), "rápido {mv} en {}", b);
+            *n += 1;
+            if depth > 1 {
+                walk(&next, depth - 1, n);
+            }
+        }
+    }
+
+    #[test]
+    fn gives_check_matches_make_move_everywhere() {
+        // S2-009: equivalencia exacta sobre todas las jugadas legales de las
+        // posiciones de perft (enroques, al paso, promociones, clavadas).
+        let fens = [
+            ("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", 4),
+            ("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1", 3),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 4),
+            ("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1", 3),
+            ("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8", 3),
+        ];
+        let mut n = 0;
+        for (fen, d) in fens {
+            walk(&Board::from_fen(fen).unwrap(), d, &mut n);
+        }
+        assert!(n > 100_000);
     }
 }
 

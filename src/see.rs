@@ -41,6 +41,7 @@ fn see_piece_value(pt: PieceType) -> i32 {
 /// hipotética `occ`. Se recalcula en cada paso del intercambio porque
 /// quitar una pieza puede "destapar" un ataque de rayos-x (p. ej. una torre
 /// detrás de otra torre en la misma columna).
+#[allow(dead_code)] // S3-002: `see` lo calcula de forma incremental; se conserva como referencia para pruebas.
 fn attackers_to(board: &Board, sq: Square, occ: Bitboard) -> Bitboard {
     let t = tables();
     let mut attackers = EMPTY;
@@ -151,8 +152,25 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
     let promo_rank_7 = 7u8;
     let to_rank = rank_of(to);
 
+    // S3-002: mismos atacantes que `attackers_to(board, to, occ)` en cada paso,
+    // sin recalcularlo todo. Peones, caballos y reyes que atacan `to` no dependen
+    // de la ocupación; los ataques de deslizantes solo cambian cuando la pieza
+    // retirada estaba en la diagonal o en la fila/columna de `to`.
+    let t = tables();
+    let (w, b) = (&board.pieces[Color::White.index()], &board.pieces[Color::Black.index()]);
+    let fixed = (t.pawn_attacks(Color::Black, to) & w[PieceType::Pawn.index()])
+        | (t.pawn_attacks(Color::White, to) & b[PieceType::Pawn.index()])
+        | (t.knight_attacks(to) & (w[PieceType::Knight.index()] | b[PieceType::Knight.index()]))
+        | (t.king_attacks(to) & (w[PieceType::King.index()] | b[PieceType::King.index()]));
+    let queens = w[PieceType::Queen.index()] | b[PieceType::Queen.index()];
+    let bishops_queens = w[PieceType::Bishop.index()] | b[PieceType::Bishop.index()] | queens;
+    let rooks_queens = w[PieceType::Rook.index()] | b[PieceType::Rook.index()] | queens;
+    let mut diag = t.bishop_attacks(to, occ) & bishops_queens;
+    let mut line = t.rook_attacks(to, occ) & rooks_queens;
+    let (to_file, to_rank_i) = (file_of(to) as i32, to_rank as i32);
+
     while n < MAX_STEPS {
-        let attackers = attackers_to(board, to, occ) & occ;
+        let attackers = (fixed | diag | line) & occ;
         let (sq, pt) = match least_valuable_attacker(board, attackers, side) {
             Some(v) => v,
             None => break,
@@ -171,6 +189,12 @@ pub fn see(board: &Board, mv: &Move) -> i32 {
             };
 
         occ = clear_bit(occ, sq);
+        let (df, dr) = (file_of(sq) as i32 - to_file, rank_of(sq) as i32 - to_rank_i);
+        if df == 0 || dr == 0 {
+            line = t.rook_attacks(to, occ) & rooks_queens;
+        } else if df.abs() == dr.abs() {
+            diag = t.bishop_attacks(to, occ) & bishops_queens;
+        }
         side = side.opposite();
         n += 1;
     }
