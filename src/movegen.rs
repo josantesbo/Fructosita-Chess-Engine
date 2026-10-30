@@ -353,15 +353,33 @@ pub struct LegalityContext {
     ncheck: u32,
     /// piezas propias absolutamente clavadas
     pinned: Bitboard,
-    /// para cada casilla clavada, la recta rey-clavador (incluyendo al clavador)
-    pin_ray: [Bitboard; 64],
+    /// S3-002: para cada pieza clavada (como mucho una por dirección desde el
+    /// rey), su casilla y la recta rey-clavador (incluyendo al clavador). Antes
+    /// era una tabla de 64 entradas puesta a cero en cada nodo.
+    pins: [(Square, Bitboard); 8],
+    npins: usize,
     /// casillas que resuelven un jaque simple (capturar o bloquear)
     checkmask: Bitboard,
 }
 
-/// Casillas ESTRICTAMENTE entre `a` y `b` si estan en linea o diagonal; 0 si no.
+/// S3-002: `between_slow` precalculado para los 64x64 pares de casillas.
+static BETWEEN: std::sync::OnceLock<Box<[[Bitboard; 64]; 64]>> = std::sync::OnceLock::new();
+
 #[inline]
-fn between_sq(a: Square, b: Square) -> Bitboard {
+pub(crate) fn between_table() -> &'static [[Bitboard; 64]; 64] {
+    BETWEEN.get_or_init(|| {
+        let mut t = Box::new([[EMPTY; 64]; 64]);
+        for a in 0..64u8 {
+            for b in 0..64u8 {
+                t[a as usize][b as usize] = between_slow(a, b);
+            }
+        }
+        t
+    })
+}
+
+/// Casillas ESTRICTAMENTE entre `a` y `b` si estan en linea o diagonal; 0 si no.
+fn between_slow(a: Square, b: Square) -> Bitboard {
     let (af, ar) = (file_of(a) as i32, rank_of(a) as i32);
     let (bf, br) = (file_of(b) as i32, rank_of(b) as i32);
     let (df, dr) = (bf - af, br - ar);
@@ -423,21 +441,24 @@ impl LegalityContext {
         let mut snipers =
             (t.bishop_attacks(ksq, EMPTY) & enemy_bq) | (t.rook_attacks(ksq, EMPTY) & enemy_rq);
         let mut pinned = EMPTY;
-        let mut pin_ray = [EMPTY; 64];
+        let mut pins = [(0 as Square, EMPTY); 8];
+        let mut npins = 0usize;
+        let between = &between_table()[ksq as usize];
         while snipers != EMPTY {
             let s = pop_lsb(&mut snipers);
-            let btw = between_sq(ksq, s);
+            let btw = between[s as usize];
             let blockers = btw & occ;
             if count_bits(blockers) == 1 && (blockers & own) != EMPTY {
                 let sq = lsb(blockers);
                 pinned = set_bit(pinned, sq);
-                pin_ray[sq as usize] = btw | set_bit(EMPTY, s);
+                pins[npins] = (sq, btw | set_bit(EMPTY, s));
+                npins += 1;
             }
         }
 
         let checkmask = if ncheck == 1 {
             let c = lsb(checkers);
-            checkers | between_sq(ksq, c)
+            checkers | between[c as usize]
         } else {
             !EMPTY
         };
@@ -449,9 +470,20 @@ impl LegalityContext {
             occ,
             ncheck,
             pinned,
-            pin_ray,
+            pins,
+            npins,
             checkmask,
         }
+    }
+
+    #[inline]
+    fn pin_ray(&self, sq: Square) -> Bitboard {
+        for k in 0..self.npins {
+            if self.pins[k].0 == sq {
+                return self.pins[k].1;
+            }
+        }
+        EMPTY
     }
 
     pub fn is_legal(&self, board: &Board, mv: Move) -> bool {
@@ -486,7 +518,7 @@ impl LegalityContext {
         }
         let from_bb = set_bit(EMPTY, mv.from);
         let ok_pin =
-            (self.pinned & from_bb) == EMPTY || (self.pin_ray[mv.from as usize] & to_bb) != EMPTY;
+            (self.pinned & from_bb) == EMPTY || (self.pin_ray(mv.from) & to_bb) != EMPTY;
         let ok_check = self.ncheck == 0 || (self.checkmask & to_bb) != EMPTY;
         ok_pin && ok_check
     }

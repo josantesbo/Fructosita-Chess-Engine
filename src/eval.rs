@@ -512,6 +512,26 @@ fn pst() -> &'static Pst {
     })
 }
 
+/// S3-002: PST base + términos fila/columna + corrección por casilla de los
+/// pesos por defecto, sumados una vez (ver `material_and_pst_components`).
+fn combined_pst() -> &'static Pst {
+    static COMBINED: OnceLock<Pst> = OnceLock::new();
+    COMBINED.get_or_init(|| {
+        let p = pst();
+        let d = default_params();
+        let mut mg = [[0i32; 64]; 6];
+        let mut eg = [[0i32; 64]; 6];
+        for pc in 0..6 {
+            for idx in 0..64usize {
+                let (f, r) = (idx & 7, 8 + (idx >> 3));
+                mg[pc][idx] = p.mg[pc][idx] + d.pst_fr[0][pc][f] + d.pst_fr[0][pc][r] + d.pst_sq[0][pc][idx];
+                eg[pc][idx] = p.eg[pc][idx] + d.pst_fr[1][pc][f] + d.pst_fr[1][pc][r] + d.pst_sq[1][pc][idx];
+            }
+        }
+        Pst { mg, eg }
+    })
+}
+
 fn game_phase(board: &Board) -> i32 {
     let mut phase = 0;
     for color in [Color::White, Color::Black] {
@@ -539,6 +559,25 @@ fn material_and_pst_components(
     color: Color,
     params: &EvalParams,
 ) -> ((i32, i32), (i32, i32)) {
+    // S3-002: con los pesos por defecto (el motor en juego) los cuatro sumandos
+    // de cada casilla ya están sumados en una tabla: mismos enteros, menos lecturas.
+    if std::ptr::eq(params, default_params()) {
+        let c = combined_pst();
+        let mut material = 0;
+        let mut pst_mg = 0;
+        let mut pst_eg = 0;
+        let flip = if color == Color::White { 0 } else { 56 };
+        for pt in ALL_PIECE_TYPES {
+            let mut bb = board.pieces[color.index()][pt.index()];
+            material += piece_value_with(params, pt) * count_bits(bb) as i32;
+            while bb != EMPTY {
+                let idx = (pop_lsb(&mut bb) ^ flip) as usize;
+                pst_mg += c.mg[pt.index()][idx];
+                pst_eg += c.eg[pt.index()][idx];
+            }
+        }
+        return ((material, material), (pst_mg, pst_eg));
+    }
     let p = pst();
     let mut material_mg = 0;
     let mut material_eg = 0;
@@ -881,27 +920,21 @@ fn king_shelter_and_passers(board: &Board, color: Color, params: &EvalParams, th
     let (kf, kr) = (file_of(ksq) as i32, rank_of(ksq) as i32);
     let rel = |r: i32| if color == Color::White { r } else { 7 - r };
     if rel(kr) <= 1 {
+        // S3-002: mismas cuentas que el recorrido peón a peón, con máscaras. Un
+        // peón a distancia relativa d del rey está en la fila kr + d (blancas) o
+        // kr − d (negras); con el rey en sus dos primeras filas esas filas existen.
+        let mut files = EMPTY;
         for f in (kf - 1).max(0)..=(kf + 1).min(7) {
-            let file_mask = FILE_A << f;
-            let mut own_on = own_pawns & file_mask;
-            while own_on != EMPTY {
-                let sq = pop_lsb(&mut own_on);
-                let d = rel(rank_of(sq) as i32) - rel(kr);
-                if d == 1 {
-                    mg += params.shield_near_mg;
-                } else if d == 2 {
-                    mg += params.shield_far_mg;
-                }
-            }
-            let mut en_on = enemy_pawns & file_mask;
-            while en_on != EMPTY {
-                let sq = pop_lsb(&mut en_on);
-                let d = rel(rank_of(sq) as i32) - rel(kr);
-                if (1..=3).contains(&d) {
-                    mg -= params.storm_mg;
-                }
-            }
+            files |= FILE_A << f;
         }
+        let rank_at = |d: i32| -> u64 {
+            let r = if color == Color::White { kr + d } else { kr - d };
+            0xFFu64 << (8 * r)
+        };
+        let near = count_bits(own_pawns & files & rank_at(1)) as i32;
+        let far = count_bits(own_pawns & files & rank_at(2)) as i32;
+        let storm = count_bits(enemy_pawns & files & (rank_at(1) | rank_at(2) | rank_at(3))) as i32;
+        mg += near * params.shield_near_mg + far * params.shield_far_mg - storm * params.storm_mg;
     }
 
     let occ_enemy = board.color_occupancy(color.opposite());
@@ -1205,27 +1238,19 @@ fn pawn_structure_components(
     let mut passed_mg = 0;
     let mut passed_eg = 0;
 
-    for file in 0u8..8 {
-        let file_mask: u64 = FILE_A << file;
-        let count_on_file = count_bits(own_pawns & file_mask) as i32;
-        if count_on_file > 1 {
-            mg -= params.doubled_mg * (count_on_file - 1);
-            eg -= params.doubled_eg * (count_on_file - 1);
-        }
-        if count_on_file > 0 {
-            let mut adjacent: u64 = 0;
-            if file > 0 {
-                adjacent |= FILE_A << (file - 1);
-            }
-            if file < 7 {
-                adjacent |= FILE_A << (file + 1);
-            }
-            if own_pawns & adjacent == EMPTY {
-                mg -= params.isolated_mg;
-                eg -= params.isolated_eg;
-            }
-        }
-    }
+    // S3-002: mismas cuentas que el recorrido columna a columna. `files` tiene un
+    // bit por columna con algún peón propio. Doblados: suma de (peones − 1) por
+    // columna = peones − columnas ocupadas. Aislados: columnas ocupadas sin
+    // vecina ocupada (la penalización es por columna, como antes).
+    let mut fill = own_pawns;
+    fill |= fill >> 8;
+    fill |= fill >> 16;
+    fill |= fill >> 32;
+    let files = fill & 0xFF;
+    let doubled = count_bits(own_pawns) as i32 - count_bits(files) as i32;
+    let isolated = count_bits(files & !((files << 1) & 0xFF) & !(files >> 1)) as i32;
+    mg -= params.doubled_mg * doubled + params.isolated_mg * isolated;
+    eg -= params.doubled_eg * doubled + params.isolated_eg * isolated;
 
     // Peones pasados: bonus creciente según lo avanzados que estén.
     let mut bb = own_pawns;

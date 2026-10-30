@@ -216,6 +216,15 @@ impl TranspositionTable {
             old_key == key || unpack_generation(old) != generation || unpack_depth(old) <= depth
         };
         if replace {
+            // S2-008: en un nodo que falla bajo (cota superior) la "mejor" jugada
+            // es la de mayor cota fail-soft, una señal ruidosa. Si la entrada
+            // anterior es de la MISMA posición y tiene jugada, se conserva esa.
+            let mut best_move = best_move;
+            if flag == TTFlag::UpperBound && old & VALID_BIT != 0 && old & (1 << 16) != 0
+                && s.check.load(Ordering::Relaxed) ^ old == key
+            {
+                best_move = unpack(old).best_move;
+            }
             let data = pack(depth, score, flag, best_move, generation);
             s.data.store(data, Ordering::Relaxed);
             s.check.store(key ^ data, Ordering::Relaxed);
@@ -252,6 +261,20 @@ mod tests {
         tt.new_search();
         tt.store(b, 3, 2, TTFlag::Exact, None);
         assert_eq!(tt.probe(b).unwrap().score, 2, "generación nueva: se reemplaza");
+    }
+
+    #[test]
+    fn upper_bound_keeps_previous_move_of_same_position() {
+        use crate::moves::MoveKind;
+        let tt = TranspositionTable::new(1);
+        let a = Move::new(12, 28, MoveKind::DoublePawnPush);
+        let b = Move::new(6, 21, MoveKind::Quiet);
+        tt.store(99, 4, 10, TTFlag::LowerBound, Some(a));
+        tt.store(99, 5, -20, TTFlag::UpperBound, Some(b));
+        let e = tt.probe(99).unwrap();
+        assert_eq!((e.depth, e.flag, e.best_move), (5, TTFlag::UpperBound, Some(a)));
+        tt.store(99, 6, 30, TTFlag::Exact, Some(b));
+        assert_eq!(tt.probe(99).unwrap().best_move, Some(b));
     }
 
     #[test]
