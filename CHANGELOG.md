@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.3.0: Faster evaluation, retuned search, Windows x64 with POPCNT support (2026-10-02)
+
+- Faster evaluation, same results: terms shared by several evaluation features are computed once per position, and everything that depends only on pawns and kings (doubled, isolated and passed pawns, king shield, open files near the king) lives in its own cache. The board keeps occupancy, material and piece-square sums up to date incrementally. Same search tree as 3.2.0 with about 13% less middlegame time.
+- Retuned search: 30 parameters tuned together with games (SPSA), 13 of them never tuned before (depth limits of near-leaf pruning, history-reduction thresholds, time allocation). The most visible changes: futility and move-count pruning reach one ply deeper, the base late-move reduction is smaller and move-count pruning starts a little earlier.
+- Fix: never two null moves in a row (the second one was scored as a repetition draw without searching).
+- Build: profile-guided optimisation (about 6% faster with the same code) and the C runtime linked into the executable, so the Visual C++ redistributable is no longer needed.
+
+Evidence:
+
+- Sealed holdout vs 3.2.0: **+44.0 ± 13.8 Elo**, 1,000 games at 10+0.1, no early stop (+324 −198 =478). No time forfeits or illegal moves.
+- During development (SPRT at 5+0.05): speed changes +23.8 ± 12.9 Elo in 1,096 games; retuned search +11.3 ± 8.3 Elo in 3,118 games.
+- Gauntlet at 10+0.1 against Cheese 3.3.0, Critter 1.6a and Equinox 3.30, 228 games each, anchored to their CCRL Blitz ratings of 2026-09-26: 3.2.0 about 2975 (95% CI 2929 to 3017), 3.3.0 about 3041 (95% CI 2998 to 3083). Short time control on my own hardware, so this is an estimate and **not a CCRL rating**.
+
+Known limitations:
+
+- With a "moves to go" time control and two moves left, the engine may spend almost the entire clock on the penultimate move.
+
+Bench signatures: depth 10 `b5c4a137e60e39db`; depth 12 `b5eed34762ad6df9`. Windows x64 and a CPU with POPCNT (a processor that supports the POPCNT instruction). On a CPU without POPCNT the engine prints a message and exits.
+
 ## 3.2.0: Much faster, slightly better search (2026-10-01)
 
 - Speed with an identical tree (about 23% less time per position): a move is made only after it survives pruning, check squares are computed once per node, the move picker sorts once, the evaluation counts bits with the POPCNT instruction and uses pre-summed tables, and SEE updates the attackers instead of recomputing them.

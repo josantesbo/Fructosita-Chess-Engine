@@ -38,6 +38,12 @@ pub struct Board {
     pub fullmove_number: u32,
     /// Hash Zobrist de la posición actual, mantenido incrementalmente.
     pub hash: u64,
+    /// S4-001: casillas ocupadas por cada bando (la unión de sus seis
+    /// bitboards), mantenida en `make_move`.
+    pub occ: [Bitboard; 2],
+    /// S4-001: material + PST con los pesos por defecto, blancas − negras
+    /// (medio juego, final), mantenido en `make_move` (ver `eval::psq_table`).
+    pub psq: (i32, i32),
 }
 
 /// S3-002: ver `Board::check_info`.
@@ -152,6 +158,20 @@ impl Board {
             hash ^= keys.en_passant_file[file_of(ep) as usize];
         }
 
+        let occ = [
+            pieces[0].iter().fold(EMPTY, |acc, &bb| acc | bb),
+            pieces[1].iter().fold(EMPTY, |acc, &bb| acc | bb),
+        ];
+        let psq_table = crate::eval::psq_table();
+        let mut psq = (0, 0);
+        for sq in 0..64usize {
+            if let Some(p) = mailbox[sq] {
+                let v = psq_table[p.color.index()][p.kind.index()][sq];
+                psq.0 += v.0;
+                psq.1 += v.1;
+            }
+        }
+
         Ok(Board {
             pieces,
             mailbox,
@@ -161,6 +181,8 @@ impl Board {
             halfmove_clock,
             fullmove_number,
             hash,
+            occ,
+            psq,
         })
     }
 
@@ -229,14 +251,12 @@ impl Board {
 
     #[inline]
     pub fn color_occupancy(&self, color: Color) -> Bitboard {
-        self.pieces[color.index()]
-            .iter()
-            .fold(EMPTY, |acc, &bb| acc | bb)
+        self.occ[color.index()]
     }
 
     #[inline]
     pub fn occupancy(&self) -> Bitboard {
-        self.color_occupancy(Color::White) | self.color_occupancy(Color::Black)
+        self.occ[0] | self.occ[1]
     }
 
     #[inline]
@@ -388,6 +408,8 @@ impl Board {
         let us = self.side_to_move;
         let them = us.opposite();
         let keys = zobrist::keys();
+        let psq = crate::eval::psq_table();
+        let (ui, ti) = (us.index(), them.index());
         let moving_piece = self.mailbox[mv.from as usize]
             .unwrap_or_else(|| panic!("make_move: no hay pieza en {}", square_to_str(mv.from)));
 
@@ -408,6 +430,10 @@ impl Board {
             clear_bit(b.pieces[us.index()][moving_piece.kind.index()], mv.from);
         b.mailbox[mv.from as usize] = None;
         b.hash ^= keys.piece(us, moving_piece.kind, mv.from);
+        b.occ[ui] ^= 1u64 << mv.from;
+        let v = psq[ui][moving_piece.kind.index()][mv.from as usize];
+        b.psq.0 -= v.0;
+        b.psq.1 -= v.1;
 
         match mv.kind {
             MoveKind::Capture | MoveKind::PromotionCapture(_) => {
@@ -417,6 +443,10 @@ impl Board {
                 b.pieces[them.index()][captured.kind.index()] =
                     clear_bit(b.pieces[them.index()][captured.kind.index()], mv.to);
                 b.hash ^= keys.piece(them, captured.kind, mv.to);
+                b.occ[ti] ^= 1u64 << mv.to;
+                let v = psq[ti][captured.kind.index()][mv.to as usize];
+                b.psq.0 -= v.0;
+                b.psq.1 -= v.1;
             }
             MoveKind::EnPassantCapture => {
                 let captured_sq = if us == Color::White {
@@ -428,6 +458,10 @@ impl Board {
                     clear_bit(b.pieces[them.index()][PieceType::Pawn.index()], captured_sq);
                 b.mailbox[captured_sq as usize] = None;
                 b.hash ^= keys.piece(them, PieceType::Pawn, captured_sq);
+                b.occ[ti] ^= 1u64 << captured_sq;
+                let v = psq[ti][PieceType::Pawn.index()][captured_sq as usize];
+                b.psq.0 -= v.0;
+                b.psq.1 -= v.1;
             }
             _ => {}
         }
@@ -437,6 +471,10 @@ impl Board {
             set_bit(b.pieces[us.index()][placed_kind.index()], mv.to);
         b.mailbox[mv.to as usize] = Some(Piece::new(us, placed_kind));
         b.hash ^= keys.piece(us, placed_kind, mv.to);
+        b.occ[ui] |= 1u64 << mv.to;
+        let v = psq[ui][placed_kind.index()][mv.to as usize];
+        b.psq.0 += v.0;
+        b.psq.1 += v.1;
 
         match mv.kind {
             MoveKind::DoublePawnPush => {
@@ -462,6 +500,10 @@ impl Board {
                 b.mailbox[rook_to as usize] = Some(Piece::new(us, PieceType::Rook));
                 b.hash ^= keys.piece(us, PieceType::Rook, rook_from);
                 b.hash ^= keys.piece(us, PieceType::Rook, rook_to);
+                b.occ[ui] ^= (1u64 << rook_from) | (1u64 << rook_to);
+                let (a, z) = (psq[ui][PieceType::Rook.index()][rook_from as usize], psq[ui][PieceType::Rook.index()][rook_to as usize]);
+                b.psq.0 += z.0 - a.0;
+                b.psq.1 += z.1 - a.1;
             }
             MoveKind::CastleQueenside => {
                 let (rook_from, rook_to) = if us == Color::White {
@@ -477,6 +519,10 @@ impl Board {
                 b.mailbox[rook_to as usize] = Some(Piece::new(us, PieceType::Rook));
                 b.hash ^= keys.piece(us, PieceType::Rook, rook_from);
                 b.hash ^= keys.piece(us, PieceType::Rook, rook_to);
+                b.occ[ui] ^= (1u64 << rook_from) | (1u64 << rook_to);
+                let (a, z) = (psq[ui][PieceType::Rook.index()][rook_from as usize], psq[ui][PieceType::Rook.index()][rook_to as usize]);
+                b.psq.0 += z.0 - a.0;
+                b.psq.1 += z.1 - a.1;
             }
             _ => {}
         }

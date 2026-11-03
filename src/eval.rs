@@ -532,6 +532,27 @@ fn combined_pst() -> &'static Pst {
     })
 }
 
+/// S4-001: material + PST de cada (bando, pieza, casilla) con los pesos por
+/// defecto y con signo (blancas +, negras −): lo que `Board` acumula en `psq`.
+/// Son los mismos sumandos que recorre `material_and_pst_components`.
+pub fn psq_table() -> &'static [[[(i32, i32); 64]; 6]; 2] {
+    static TABLE: OnceLock<[[[(i32, i32); 64]; 6]; 2]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let c = combined_pst();
+        let d = default_params();
+        let mut t = [[[(0i32, 0i32); 64]; 6]; 2];
+        for pt in ALL_PIECE_TYPES {
+            let value = piece_value_with(d, pt);
+            for sq in 0..64usize {
+                let (w, b) = (sq, sq ^ 56);
+                t[0][pt.index()][sq] = (value + c.mg[pt.index()][w], value + c.eg[pt.index()][w]);
+                t[1][pt.index()][sq] = (-(value + c.mg[pt.index()][b]), -(value + c.eg[pt.index()][b]));
+            }
+        }
+        t
+    })
+}
+
 fn game_phase(board: &Board) -> i32 {
     let mut phase = 0;
     for color in [Color::White, Color::Black] {
@@ -913,29 +934,9 @@ fn king_shelter_and_passers(board: &Board, color: Color, params: &EvalParams, th
     let ei = color.opposite().index();
     let own_pawns = board.pieces[ci][PieceType::Pawn.index()];
     let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
-    let mut mg = 0;
+    let mut mg = shelter_and_storm(board, color, params);
     let mut eg = 0;
-
-    let ksq = board.king_square(color);
-    let (kf, kr) = (file_of(ksq) as i32, rank_of(ksq) as i32);
     let rel = |r: i32| if color == Color::White { r } else { 7 - r };
-    if rel(kr) <= 1 {
-        // S3-002: mismas cuentas que el recorrido peón a peón, con máscaras. Un
-        // peón a distancia relativa d del rey está en la fila kr + d (blancas) o
-        // kr − d (negras); con el rey en sus dos primeras filas esas filas existen.
-        let mut files = EMPTY;
-        for f in (kf - 1).max(0)..=(kf + 1).min(7) {
-            files |= FILE_A << f;
-        }
-        let rank_at = |d: i32| -> u64 {
-            let r = if color == Color::White { kr + d } else { kr - d };
-            0xFFu64 << (8 * r)
-        };
-        let near = count_bits(own_pawns & files & rank_at(1)) as i32;
-        let far = count_bits(own_pawns & files & rank_at(2)) as i32;
-        let storm = count_bits(enemy_pawns & files & (rank_at(1) | rank_at(2) | rank_at(3))) as i32;
-        mg += near * params.shield_near_mg + far * params.shield_far_mg - storm * params.storm_mg;
-    }
 
     let occ_enemy = board.color_occupancy(color.opposite());
     let mut pawns = own_pawns;
@@ -957,6 +958,38 @@ fn king_shelter_and_passers(board: &Board, color: Color, params: &EvalParams, th
         }
     }
     (mg, eg)
+}
+
+/// Escudo y tormenta de EVAL-E (solo medio juego). Dependen únicamente de los
+/// peones y del rey propio: S4-001 los guarda en la caché de peones y reyes.
+fn shelter_and_storm(board: &Board, color: Color, params: &EvalParams) -> i32 {
+    let ci = color.index();
+    let ei = color.opposite().index();
+    let own_pawns = board.pieces[ci][PieceType::Pawn.index()];
+    let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
+    let mut mg = 0;
+
+    let ksq = board.king_square(color);
+    let (kf, kr) = (file_of(ksq) as i32, rank_of(ksq) as i32);
+    let rel = |r: i32| if color == Color::White { r } else { 7 - r };
+    if rel(kr) <= 1 {
+        // S3-002: mismas cuentas que el recorrido peón a peón, con máscaras. Un
+        // peón a distancia relativa d del rey está en la fila kr + d (blancas) o
+        // kr − d (negras); con el rey en sus dos primeras filas esas filas existen.
+        let mut files = EMPTY;
+        for f in (kf - 1).max(0)..=(kf + 1).min(7) {
+            files |= FILE_A << f;
+        }
+        let rank_at = |d: i32| -> u64 {
+            let r = if color == Color::White { kr + d } else { kr - d };
+            0xFFu64 << (8 * r)
+        };
+        let near = count_bits(own_pawns & files & rank_at(1)) as i32;
+        let far = count_bits(own_pawns & files & rank_at(2)) as i32;
+        let storm = count_bits(enemy_pawns & files & (rank_at(1) | rank_at(2) | rank_at(3))) as i32;
+        mg += near * params.shield_near_mg + far * params.shield_far_mg - storm * params.storm_mg;
+    }
+    mg
 }
 
 fn threats_core(
@@ -1416,6 +1449,360 @@ pub fn evaluate(board: &Board) -> i32 {
     breakdown(board).total
 }
 
+// ---------------------------------------------------------------------------
+// S4-001 (SPEED) — ruta rápida de la evaluación para la búsqueda.
+//
+// `breakdown_with` sigue siendo la REFERENCIA (la usan el afinador, `eval` por
+// UCI y los tests). `evaluate_cached` devuelve exactamente el mismo entero con
+// los pesos por defecto (test `fast_eval_matches_reference`), pero:
+//   - calcula una sola vez por posición lo que varios términos repetían
+//     (ocupación, ataques de peones, zona de cada rey y los rayos de alfil y
+//     torre desde cada rey, que usaban la presión sobre el rey y las clavadas);
+//   - guarda en una caché por hilo todo lo que depende SOLO de los peones y de
+//     las casillas de los dos reyes: doblados/aislados, bonus de pasados
+//     (incluida la carrera de reyes), columnas abiertas junto al rey, escudo y
+//     tormenta, distancias de reyes al pasado, y qué peones son pasados;
+//   - no construye el desglose por componentes.
+// La entrada guarda los dos bitboards de peones y las casillas de los reyes y
+// se compara entera: un acierto es siempre de la misma estructura (sin riesgo
+// de colisión). Los términos son sumas de enteros, así que reagruparlos no
+// cambia el resultado.
+// ---------------------------------------------------------------------------
+pub const PAWN_CACHE_BITS: u32 = 12;
+
+#[derive(Clone, Copy)]
+pub struct PawnEntry {
+    white_pawns: u64,
+    black_pawns: u64,
+    /// Peones pasados de cada bando.
+    passed: [u64; 2],
+    /// Suma blanca − negra de los términos de peones y reyes.
+    mg: i32,
+    eg: i32,
+    /// Rey blanco | rey negro << 6 | 0x8000 (entrada ocupada; cero = vacía).
+    kings: u32,
+}
+
+pub struct PawnCache {
+    entries: [PawnEntry; 1 << PAWN_CACHE_BITS],
+}
+
+impl PawnCache {
+    /// Caché vacía en el heap (todo ceros es una entrada vacía válida).
+    #[allow(dead_code)]
+    pub fn new_boxed() -> Box<PawnCache> {
+        // SAFETY: `PawnCache` son solo enteros; todo ceros es un valor válido.
+        unsafe { Box::new_zeroed().assume_init() }
+    }
+}
+
+fn pawn_king_entry(board: &Board, params: &EvalParams, kings: u32) -> PawnEntry {
+    let mut mg = 0;
+    let mut eg = 0;
+    let mut passed = [EMPTY; 2];
+    for color in [Color::White, Color::Black] {
+        let ci = color.index();
+        let enemy = color.opposite();
+        let enemy_pawns = board.pieces[enemy.index()][PieceType::Pawn.index()];
+        let (structure, passers) = pawn_structure_components(board, color, params);
+        let c_mg = structure.0 + passers.0 + king_safety(board, color, params) + shelter_and_storm(board, color, params);
+        let mut c_eg = structure.1 + passers.1;
+        let own_king = board.king_square(color);
+        let enemy_king = board.king_square(enemy);
+        let mut pawns = board.pieces[ci][PieceType::Pawn.index()];
+        while pawns != EMPTY {
+            let sq = pop_lsb(&mut pawns);
+            if !is_passed_pawn(enemy_pawns, color, sq) {
+                continue;
+            }
+            passed[ci] |= 1u64 << sq;
+            let ahead = if color == Color::White { sq + 8 } else { sq.wrapping_sub(8) };
+            if ahead < 64 {
+                c_eg += chebyshev(enemy_king, ahead) * params.passer_kdist_enemy_eg
+                    - chebyshev(own_king, ahead) * params.passer_kdist_own_eg;
+            }
+        }
+        if color == Color::White {
+            mg += c_mg;
+            eg += c_eg;
+        } else {
+            mg -= c_mg;
+            eg -= c_eg;
+        }
+    }
+    PawnEntry {
+        white_pawns: board.pieces[0][PieceType::Pawn.index()],
+        black_pawns: board.pieces[1][PieceType::Pawn.index()],
+        passed,
+        mg,
+        eg,
+        kings,
+    }
+}
+
+/// Datos de la posición que comparten varios términos de la ruta rápida.
+struct Shared {
+    occ: u64,
+    occ_c: [u64; 2],
+    pawn_att: [u64; 2],
+    /// Zona de cada rey (EVAL-A) y rayos de alfil y torre desde su casilla.
+    zone: [u64; 2],
+    king_diag: [u64; 2],
+    king_line: [u64; 2],
+    passed: [u64; 2],
+}
+
+/// Igual que `scan_pieces`, con los datos compartidos ya calculados.
+fn fast_scan(board: &Board, color: Color, params: &EvalParams, sh: &Shared) -> PieceScan {
+    let t = tables();
+    let ci = color.index();
+    let ei = color.opposite().index();
+    let occ = sh.occ;
+    let zone = sh.zone[ei];
+    let safe = !sh.occ_c[ci] & !sh.pawn_att[ei];
+    let (mut mob_mg, mut mob_eg) = (0i32, 0i32);
+    let mut units = 0i32;
+    let mut attackers = 0i32;
+    let mut attacks = sh.pawn_att[ci] | t.king_attacks(board.king_square(color));
+    let mut minor_attacks = 0u64;
+    let mut by_type = [0u64; 4];
+
+    for pt in [PieceType::Knight, PieceType::Bishop, PieceType::Rook, PieceType::Queen] {
+        let (wmg, weg) = match pt {
+            PieceType::Knight => (params.mob_knight_mg, params.mob_knight_eg),
+            PieceType::Bishop => (params.mob_bishop_mg, params.mob_bishop_eg),
+            PieceType::Rook => (params.mob_rook_mg, params.mob_rook_eg),
+            _ => (params.mob_queen_mg, params.mob_queen_eg),
+        };
+        let mut bb = board.pieces[ci][pt.index()];
+        while bb != EMPTY {
+            let sq = pop_lsb(&mut bb);
+            let att = match pt {
+                PieceType::Knight => t.knight_attacks(sq),
+                PieceType::Bishop => t.bishop_attacks(sq, occ),
+                PieceType::Rook => t.rook_attacks(sq, occ),
+                _ => t.queen_attacks(sq, occ),
+            };
+            attacks |= att;
+            by_type[pt.index() - 1] |= att;
+            if matches!(pt, PieceType::Knight | PieceType::Bishop) {
+                minor_attacks |= att;
+            }
+            let n = count_bits(att & safe) as i32;
+            mob_mg += n * wmg;
+            mob_eg += n * weg;
+            let hits = count_bits(att & zone) as i32;
+            if hits > 0 {
+                attackers += 1;
+                units += KA_UNITS[pt.index()] * hits;
+            }
+        }
+    }
+
+    let mut king_attack = 0;
+    if attackers >= 2 {
+        king_attack = (units * units / KA_DIVISOR).min(KA_CAP);
+        if board.pieces[ci][PieceType::Queen.index()] == EMPTY {
+            king_attack /= 2;
+        }
+    }
+    PieceScan { mob_mg, mob_eg, king_attack, attacks, minor_attacks, by_type }
+}
+
+/// Términos de `color` que dependen de las piezas: los de `threats_and_outposts`
+/// (menos el escudo y las distancias de reyes, que van en la caché) más
+/// `piece_extras`. Cada bloque repite las cuentas de la función de referencia
+/// que se nombra.
+fn fast_side_terms(board: &Board, color: Color, params: &EvalParams, sh: &Shared, own: &PieceScan, their: &PieceScan) -> (i32, i32) {
+    let t = tables();
+    let ci = color.index();
+    let enemy = color.opposite();
+    let ei = enemy.index();
+    let occ = sh.occ;
+    let own_pawns = board.pieces[ci][PieceType::Pawn.index()];
+    let enemy_pawns = board.pieces[ei][PieceType::Pawn.index()];
+    let own_knights = board.pieces[ci][PieceType::Knight.index()];
+    let own_bishops = board.pieces[ci][PieceType::Bishop.index()];
+    let own_rooks = board.pieces[ci][PieceType::Rook.index()];
+    let own_queens = board.pieces[ci][PieceType::Queen.index()];
+    let enemy_queens = board.pieces[ei][PieceType::Queen.index()];
+    let majors = board.pieces[ei][PieceType::Rook.index()] | enemy_queens;
+    let pieces = board.pieces[ei][PieceType::Knight.index()] | board.pieces[ei][PieceType::Bishop.index()] | majors;
+    let own_pawn_att = sh.pawn_att[ci];
+
+    // threats_core
+    let by_pawn = count_bits(pieces & own_pawn_att) as i32;
+    let by_minor = count_bits(majors & own.minor_attacks) as i32;
+    let hanging = count_bits(pieces & own.attacks & !their.attacks) as i32;
+    let mut mg = by_pawn * params.threat_pawn_mg + by_minor * params.threat_minor_mg + hanging * params.hanging_mg;
+    let mut eg = by_pawn * params.threat_pawn_eg + by_minor * params.threat_minor_eg + hanging * params.hanging_eg;
+    let mut knights = own_knights & own_pawn_att;
+    while knights != EMPTY {
+        let sq = pop_lsb(&mut knights);
+        let rel_rank = if color == Color::White { rank_of(sq) } else { 7 - rank_of(sq) };
+        if !(3..=5).contains(&rel_rank) {
+            continue;
+        }
+        let file_mask = FILE_A << file_of(sq);
+        if enemy_pawns & PASSED_MASK[ci][sq as usize] & !file_mask == EMPTY {
+            mg += params.outpost_mg;
+            eg += params.outpost_eg;
+        }
+    }
+
+    // king_pressure
+    let ksq = board.king_square(enemy);
+    let bdiag = sh.king_diag[ei];
+    let rline = sh.king_line[ei];
+    let free = !sh.occ_c[ci] & !their.attacks;
+    let n = count_bits(own.by_type[0] & t.knight_attacks(ksq) & free) as i32;
+    let b = count_bits(own.by_type[1] & bdiag & free) as i32;
+    let r = count_bits(own.by_type[2] & rline & free) as i32;
+    let q = count_bits(own.by_type[3] & (bdiag | rline) & free) as i32;
+    let weak = count_bits(sh.zone[ei] & own.attacks & !their.attacks) as i32;
+    mg += n * params.check_knight_mg + b * params.check_bishop_mg + r * params.check_rook_mg
+        + q * params.check_queen_mg + weak * params.zone_weak_mg;
+    eg += n * params.check_knight_eg + b * params.check_bishop_eg + r * params.check_rook_eg
+        + q * params.check_queen_eg;
+
+    // eval_l_terms (las distancias de reyes al pasado están en la caché)
+    let push = if color == Color::White { own_pawns << 8 } else { own_pawns >> 8 } & !occ;
+    let safe_push = push & !sh.pawn_att[ei] & (own.attacks | !their.attacks);
+    let push_threats = count_bits(pawn_attacks_bb(safe_push, color) & pieces) as i32;
+    let pawn_hanging = count_bits(enemy_pawns & own.attacks & !their.attacks) as i32;
+    mg += push_threats * params.push_threat_mg + pawn_hanging * params.pawn_hanging_mg;
+    eg += push_threats * params.push_threat_eg + pawn_hanging * params.pawn_hanging_eg;
+    let minors = own_knights | own_bishops;
+    let front_of_minors = if color == Color::White { minors << 8 } else { minors >> 8 };
+    mg += count_bits(front_of_minors & own_pawns) as i32 * params.minor_behind_pawn_mg;
+
+    // Pasados: torre detrás (eval_l_terms) y bloqueado / con paso libre
+    // (king_shelter_and_passers), sobre los pasados que da la caché.
+    let mut passers = sh.passed[ci];
+    while passers != EMPTY {
+        let sq = pop_lsb(&mut passers);
+        if own_rooks != EMPTY {
+            let behind: u64 = if color == Color::White { (1u64 << sq) - 1 } else { !((2u64 << sq).wrapping_sub(1)) };
+            let file_mask = FILE_A << file_of(sq);
+            if t.rook_attacks(sq, occ) & file_mask & behind & own_rooks != EMPTY {
+                eg += params.rook_behind_passer_eg;
+            }
+        }
+        let ahead = if color == Color::White { sq + 8 } else { sq.wrapping_sub(8) };
+        if ahead >= 64 {
+            continue;
+        }
+        let ahead_bb = 1u64 << ahead;
+        if sh.occ_c[ei] & ahead_bb != EMPTY {
+            mg -= params.passed_blocked_mg;
+            eg -= params.passed_blocked_eg;
+        } else if occ & ahead_bb == EMPTY && their.attacks & ahead_bb == EMPTY {
+            let rel_rank = if color == Color::White { rank_of(sq) as i32 } else { 7 - rank_of(sq) as i32 };
+            eg += params.passed_free_eg * rel_rank;
+        }
+    }
+
+    // eval_m_terms
+    let diag_sliders = own_bishops | own_queens;
+    let line_sliders = own_rooks | own_queens;
+    let mut pinned = 0i32;
+    let blockers = bdiag & pieces;
+    if blockers != EMPTY && diag_sliders != EMPTY {
+        let xray = t.bishop_attacks(ksq, occ & !blockers) & !bdiag;
+        let mut pinners = xray & diag_sliders;
+        while pinners != EMPTY {
+            let p = pop_lsb(&mut pinners);
+            if t.bishop_attacks(p, occ) & blockers & bdiag != EMPTY {
+                pinned += 1;
+            }
+        }
+    }
+    let blockers = rline & pieces;
+    if blockers != EMPTY && line_sliders != EMPTY {
+        let xray = t.rook_attacks(ksq, occ & !blockers) & !rline;
+        let mut pinners = xray & line_sliders;
+        while pinners != EMPTY {
+            let p = pop_lsb(&mut pinners);
+            if t.rook_attacks(p, occ) & blockers & rline != EMPTY {
+                pinned += 1;
+            }
+        }
+    }
+    let rq = count_bits(own.by_type[2] & enemy_queens) as i32;
+    let n_pawns = count_bits(own_pawns) as i32;
+    let imb = count_bits(own_knights) as i32 * n_pawns * params.knight_per_pawn
+        - count_bits(own_rooks) as i32 * n_pawns * params.rook_per_pawn;
+    mg += pinned * params.pinned_mg + rq * params.threat_rook_queen_mg + imb;
+    eg += pinned * params.pinned_eg + rq * params.threat_rook_queen_eg + imb;
+
+    // piece_extras
+    if count_bits(own_bishops) >= 2 {
+        mg += params.bishop_pair_mg;
+        eg += params.bishop_pair_eg;
+    }
+    let mut rooks = own_rooks;
+    while rooks != EMPTY {
+        let sq = pop_lsb(&mut rooks);
+        let file_mask: u64 = FILE_A << file_of(sq);
+        if own_pawns & file_mask == EMPTY {
+            if enemy_pawns & file_mask == EMPTY {
+                mg += params.rook_open_mg;
+                eg += params.rook_open_eg;
+            } else {
+                mg += params.rook_semi_mg;
+                eg += params.rook_semi_eg;
+            }
+        }
+    }
+    (mg, eg)
+}
+
+/// S4-001: `evaluate` con los pesos por defecto, ruta rápida (ver arriba).
+pub fn evaluate_cached(board: &Board, cache: &mut PawnCache) -> i32 {
+    let params = default_params();
+    let t = tables();
+    let (wk, bk) = (board.king_square(Color::White), board.king_square(Color::Black));
+    let white_pawns = board.pieces[0][PieceType::Pawn.index()];
+    let black_pawns = board.pieces[1][PieceType::Pawn.index()];
+
+    let kings = wk as u32 | (bk as u32) << 6 | 0x8000;
+    let h = white_pawns.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ black_pawns.wrapping_mul(0xC2B2_AE3D_27D4_EB4F).rotate_left(31)
+        ^ (kings as u64).wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    let slot = &mut cache.entries[(h >> (64 - PAWN_CACHE_BITS)) as usize];
+    if slot.kings != kings || slot.white_pawns != white_pawns || slot.black_pawns != black_pawns {
+        *slot = pawn_king_entry(board, params, kings);
+    }
+    let pk = *slot;
+
+    let occ_c = [board.color_occupancy(Color::White), board.color_occupancy(Color::Black)];
+    let occ = occ_c[0] | occ_c[1];
+    let sh = Shared {
+        occ,
+        occ_c,
+        pawn_att: [pawn_attacks_bb(white_pawns, Color::White), pawn_attacks_bb(black_pawns, Color::Black)],
+        zone: [king_zone(wk, Color::White), king_zone(bk, Color::Black)],
+        king_diag: [t.bishop_attacks(wk, occ), t.bishop_attacks(bk, occ)],
+        king_line: [t.rook_attacks(wk, occ), t.rook_attacks(bk, occ)],
+        passed: pk.passed,
+    };
+
+    let ws = fast_scan(board, Color::White, params, &sh);
+    let bs = fast_scan(board, Color::Black, params, &sh);
+    let (wt_mg, wt_eg) = fast_side_terms(board, Color::White, params, &sh, &ws, &bs);
+    let (bt_mg, bt_eg) = fast_side_terms(board, Color::Black, params, &sh, &bs, &ws);
+
+    // Material y PST: `board.psq` (blancas − negras) se mantiene en `make_move`.
+    let mg = board.psq.0 + (ws.mob_mg + ws.king_attack + wt_mg) - (bs.mob_mg + bs.king_attack + bt_mg) + pk.mg;
+    let eg = board.psq.1 + (ws.mob_eg + wt_eg) - (bs.mob_eg + bt_eg) + pk.eg;
+
+    let tapered = taper(mg, eg, game_phase(board));
+    let score = endgame_adjust(board, tapered, params);
+    // EXP-0012: con material insuficiente la posición es tablas: sin tempo.
+    let tempo = if score == 0 && tapered != 0 { 0 } else { params.tempo };
+    relative_to_move(board, score) + tempo
+}
+
 /// Igual que `evaluate`, pero con pesos arbitrarios: es la puerta que usa el
 /// afinador Texel para probar candidatos sin tocar los defaults del motor.
 pub fn evaluate_with(board: &Board, params: &EvalParams) -> i32 {
@@ -1563,6 +1950,54 @@ pub fn trace(board: &Board) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// S4-001: la ruta rápida da el mismo entero que la referencia en cada
+    /// posición de muchas partidas aleatorias (medio juego y finales), con la
+    /// caché compartida entre todas (aciertos y reemplazos incluidos).
+    #[test]
+    fn fast_eval_matches_reference() {
+        let starts = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "4k3/pp3ppp/8/3P4/8/2B5/PP3PPP/4K2R w K - 0 1",
+            "8/5pk1/6p1/1P5p/7P/5KP1/8/1r1R4 w - - 0 1",
+            "6k1/5p2/6p1/8/7p/8/6PP/3b2K1 w - - 0 1",
+            "8/8/4k3/8/8/2B5/4K3/7b w - - 0 1",
+            "8/8/8/4k3/8/8/4K3/3Q4 w - - 0 1",
+        ];
+        let mut cache = PawnCache::new_boxed();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut checked = 0u32;
+        for round in 0..60 {
+            for fen in starts {
+                let mut board = Board::from_fen(fen).unwrap();
+                for _ in 0..(80 + round) {
+                    assert_eq!(evaluate_cached(&board, &mut cache), breakdown(&board).total, "{}", board.to_fen());
+                    // Los campos incrementales del tablero coinciden con los de un tablero recién leído.
+                    let fresh = Board::from_fen(&board.to_fen()).unwrap();
+                    assert_eq!((board.occ, board.psq, board.hash), (fresh.occ, fresh.psq, fresh.hash), "{}", board.to_fen());
+                    checked += 1;
+                    let moves = crate::movegen::generate_legal_moves(&board);
+                    if moves.is_empty() || board.halfmove_clock >= 100 {
+                        break;
+                    }
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    // Las capturas salen el doble: así las partidas llegan a finales.
+                    let caps: Vec<_> = moves.iter().copied().filter(|m| m.is_capture()).collect();
+                    let pick = (seed >> 20) as usize;
+                    board = if !caps.is_empty() && pick % 3 == 0 {
+                        board.make_move(caps[(pick / 3) % caps.len()])
+                    } else {
+                        board.make_move(moves[(pick / 3) % moves.len()])
+                    };
+                }
+            }
+        }
+        assert!(checked > 20_000, "pocas posiciones comprobadas: {checked}");
+    }
 
     #[test]
     fn insufficient_material_is_a_draw() {

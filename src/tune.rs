@@ -26,23 +26,37 @@ macro_rules! params {
 }
 
 params! {
-    RFP_MARGIN = "RfpMargin", 76, 30, 160;
-    RFP_IMPROVING_BONUS = "RfpImproving", 24, 0, 80;
-    FUTILITY_BASE = "FutBase", 96, 20, 250;
-    FUTILITY_STEP = "FutStep", 103, 30, 250;
-    FUTILITY_IMPROVING_BONUS = "FutImproving", 53, 0, 150;
-    LMP_BASE = "LmpBase", 4, 1, 8;
-    LMR_BASE_X100 = "LmrBase", 58, 0, 150;
-    LMR_DIV_X100 = "LmrDiv", 253, 150, 500;
-    NULL_DIV = "NullDiv", 202, 80, 400;
-    RAZOR_MARGIN = "RazorMargin", 229, 100, 500;
-    PROBCUT_MARGIN = "ProbcutMargin", 153, 60, 300;
-    ASP_DELTA = "AspDelta", 22, 8, 60;
-    SEE_PRUNE_MARGIN = "SeePruneMargin", 93, 30, 250;
-    DELTA_MARGIN = "DeltaMargin", 224, 50, 400;
-    TM_PANIC_DROP = "PanicDrop", 31, 10, 80;
+    RFP_MARGIN = "RfpMargin", 75, 30, 160;
+    RFP_IMPROVING_BONUS = "RfpImproving", 17, 0, 80;
+    FUTILITY_BASE = "FutBase", 98, 20, 250;
+    FUTILITY_STEP = "FutStep", 107, 30, 250;
+    FUTILITY_IMPROVING_BONUS = "FutImproving", 52, 0, 150;
+    LMP_BASE = "LmpBase", 3, 1, 8;
+    LMR_BASE_X100 = "LmrBase", 53, 0, 150;
+    LMR_DIV_X100 = "LmrDiv", 244, 150, 500;
+    NULL_DIV = "NullDiv", 192, 80, 400;
+    RAZOR_MARGIN = "RazorMargin", 222, 100, 500;
+    PROBCUT_MARGIN = "ProbcutMargin", 165, 60, 300;
+    ASP_DELTA = "AspDelta", 21, 8, 60;
+    SEE_PRUNE_MARGIN = "SeePruneMargin", 86, 30, 250;
+    DELTA_MARGIN = "DeltaMargin", 240, 50, 400;
+    TM_PANIC_DROP = "PanicDrop", 29, 10, 80;
     SE_MIN_DEPTH = "SeMinDepth", 8, 4, 12;
     SE_MARGIN = "SeMargin", 2, 1, 6;
+    // S4-002: constantes estructurales que nunca se habían afinado (valor por defecto = el de 3.2.0).
+    RFP_MAX_DEPTH = "RfpMaxDepth", 6, 3, 12;
+    FUT_MAX_DEPTH = "FutMaxDepth", 5, 2, 10;
+    LMP_MAX_DEPTH = "LmpMaxDepth", 5, 2, 10;
+    SEE_PRUNE_MAX_DEPTH = "SeePruneMaxDepth", 4, 2, 10;
+    IIR_MIN_DEPTH = "IirMinDepth", 4, 2, 10;
+    NULL_DEPTH_DIV = "NullDepthDiv", 4, 2, 8;
+    LMR_HIST_GOOD = "LmrHistGood", 1119, 100, 20000;
+    LMR_HIST_BAD = "LmrHistBad", 77, -5000, 1000;
+    TM_MOVES_TO_GO = "TmMovesToGo", 31, 12, 60;
+    TM_START_PCT = "TmStartPct", 61, 25, 100;
+    TM_HARD_X10 = "TmHardX10", 32, 12, 80;
+    TM_INSTAB_12 = "TmInstab12", 17, 12, 36;
+    TM_PANIC_12 = "TmPanic12", 19, 12, 36;
 }
 
 #[inline(always)]
