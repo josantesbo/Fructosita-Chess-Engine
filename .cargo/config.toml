@@ -1,5 +1,6 @@
 # S3-002: POPCNT por hardware (la eval cuenta bits decenas de veces por posición).
 # Lo tiene todo x86-64 desde 2008. Ojo: la variable de entorno RUSTFLAGS, si está
 # definida, sustituye a esta lista.
+# S4: la CRT se enlaza de forma estática para que el exe no dependa de VCRUNTIME140.dll.
 [build]
-rustflags = ["-C", "target-feature=+popcnt"]
+rustflags = ["-C", "target-feature=+popcnt,+crt-static"]

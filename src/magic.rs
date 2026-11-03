@@ -110,6 +110,18 @@ struct MagicEntry {
     table: Vec<Bitboard>,
 }
 
+/// S4-001: entrada "plana" para la consulta en juego. Las 128 tablas se copian
+/// una detrás de otra en un único bloque (`MagicTables::attacks`) y cada casilla
+/// guarda dónde empieza la suya: la consulta lee la entrada y el ataque, sin
+/// pasar por el puntero de un `Vec` por casilla. Mismos índices, mismos valores.
+#[derive(Clone, Copy)]
+struct FlatMagic {
+    mask: Bitboard,
+    magic: u64,
+    shift: u32,
+    offset: u32,
+}
+
 impl MagicEntry {
     #[inline(always)]
     fn index(&self, occ: Bitboard) -> usize {
@@ -159,29 +171,48 @@ fn build_table(sq: Square, magic: u64, is_rook: bool) -> MagicEntry {
 }
 
 pub struct MagicTables {
-    rook: Vec<MagicEntry>,
-    bishop: Vec<MagicEntry>,
+    rook: [FlatMagic; 64],
+    bishop: [FlatMagic; 64],
+    attacks: Box<[Bitboard]>,
 }
 
 impl MagicTables {
     fn new() -> Self {
-        let rook = (0u8..64)
-            .map(|sq| build_table(sq, ROOK_MAGICS[sq as usize], true))
-            .collect();
-        let bishop = (0u8..64)
-            .map(|sq| build_table(sq, BISHOP_MAGICS[sq as usize], false))
-            .collect();
-        MagicTables { rook, bishop }
+        let mut attacks: Vec<Bitboard> = Vec::new();
+        let mut flatten = |is_rook: bool| -> [FlatMagic; 64] {
+            let mut out = [FlatMagic { mask: 0, magic: 0, shift: 0, offset: 0 }; 64];
+            for sq in 0u8..64 {
+                let magic = if is_rook { ROOK_MAGICS[sq as usize] } else { BISHOP_MAGICS[sq as usize] };
+                let e = build_table(sq, magic, is_rook);
+                // El índice de una ocupación cualquiera es el mismo que antes.
+                debug_assert!(e.index(!0) < e.table.len() && e.attacks(0) == e.table[0]);
+                out[sq as usize] = FlatMagic { mask: e.mask, magic: e.magic, shift: e.shift, offset: attacks.len() as u32 };
+                attacks.extend_from_slice(&e.table);
+            }
+            out
+        };
+        let rook = flatten(true);
+        let bishop = flatten(false);
+        MagicTables { rook, bishop, attacks: attacks.into_boxed_slice() }
+    }
+
+    #[inline(always)]
+    fn lookup(&self, e: &FlatMagic, occ: Bitboard) -> Bitboard {
+        let i = e.offset as usize + (((occ & e.mask).wrapping_mul(e.magic)) >> e.shift) as usize;
+        // SAFETY: `offset` + índice < longitud del bloque: cada tabla ocupa
+        // 2^(64 − shift) entradas contiguas y el índice se obtiene con ese
+        // mismo desplazamiento (ver `new`), así que nunca sale de su tabla.
+        unsafe { *self.attacks.get_unchecked(i) }
     }
 
     #[inline(always)]
     pub fn rook_attacks(&self, sq: Square, occ: Bitboard) -> Bitboard {
-        self.rook[sq as usize].attacks(occ)
+        self.lookup(&self.rook[(sq & 63) as usize], occ)
     }
 
     #[inline(always)]
     pub fn bishop_attacks(&self, sq: Square, occ: Bitboard) -> Bitboard {
-        self.bishop[sq as usize].attacks(occ)
+        self.lookup(&self.bishop[(sq & 63) as usize], occ)
     }
 }
 

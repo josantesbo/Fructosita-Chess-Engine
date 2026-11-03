@@ -208,7 +208,7 @@ fn cached_eval(board: &Board, ctx: &mut SearchContext) -> i32 {
     if e != 0 && (e & EVAL_KEY_MASK) == (board.hash & EVAL_KEY_MASK) {
         return (e & 0xFFFF) as u16 as i16 as i32;
     }
-    let v = eval::evaluate(board);
+    let v = eval::evaluate_cached(board, &mut ctx.hist.pawn_cache);
     ctx.hist.eval_cache[idx] = (board.hash & EVAL_KEY_MASK) | (v as i16 as u16 as u64);
     v
 }
@@ -260,6 +260,8 @@ struct Histories {
     /// PATCH G19: caché de eval (SPEED-B) persistente: la eval es función pura
     /// de la posición, así que las entradas de jugadas anteriores siguen valiendo.
     eval_cache: [u64; 1 << EVAL_CACHE_BITS],
+    /// S4-001: caché de peones y reyes de la eval (función pura de la estructura).
+    pawn_cache: eval::PawnCache,
     butterfly: [[[i32; 64]; 64]; 2],
     cont: [[[[i16; 64]; 6]; 64]; 6],
     /// EXP-0046: correction history (EXP-0033) también persistente, sin
@@ -309,6 +311,8 @@ struct SearchContext<'a> {
     /// EXP-0014: jugada excluida en la búsqueda de verificación singular de
     /// cada ply (misma posición, todas las jugadas salvo esta).
     excluded: [Option<Move>; MAX_PLY],
+    /// S2-007: la jugada que llevó del ply p al p+1 fue un null move.
+    null_at: [bool; MAX_PLY],
     /// Profundidad de la iteración en curso (guarda de las extensiones).
     root_depth: i32,
     /// Nodos de este hilo (no se reinicia al volcar): marca el chequeo de tiempo.
@@ -597,8 +601,7 @@ fn gives_check_cached(
     })
 }
 
-/// S2-003: umbral de historial "bueno" para reducir menos (medido, ver LMR).
-const LMR_HIST_GOOD: i32 = 1_000;
+/// S2-003: umbral de historial "bueno" para reducir menos: `tune::LMR_HIST_GOOD` (1000; medido, ver LMR).
 
 /// S2-003: la misma puntuación que `move_score` da a una silenciosa que no es
 /// killer ni jugada de la TT (historial mariposa combinado con continuation
@@ -930,8 +933,7 @@ fn negamax(
     //
     // `!in_check` es obligatorio: en jaque `depth` ya subió por la extensión, y
     // restarle 1 la anularía exactamente (18% de los candidatos). Ver §6.
-    const IIR_MIN_DEPTH: i32 = 4;
-    let iir_depth = if tt_move.is_none() && !in_check && depth >= IIR_MIN_DEPTH {
+    let iir_depth = if tt_move.is_none() && !in_check && depth >= tune::get(tune::IIR_MIN_DEPTH) {
         depth - 1
     } else {
         depth
@@ -978,7 +980,7 @@ fn negamax(
     // (no arriesgar cerca de mates forzados). El margen se MODULA con
     // "improving": cuando la posición NO mejora se exige menos colchón (se poda
     // algo más). Constantes de partida, a afinar por SPRT — NO copiadas.
-    const RFP_MAX_DEPTH: i32 = 6;
+    let RFP_MAX_DEPTH: i32 = tune::get(tune::RFP_MAX_DEPTH);
     let RFP_MARGIN: i32 = tune::get(tune::RFP_MARGIN); // centipeones por unidad de profundidad
     let RFP_IMPROVING_BONUS: i32 = tune::get(tune::RFP_IMPROVING_BONUS); // colchón extra cuando la posición mejora
     let rfp_margin = RFP_MARGIN - if improving { 0 } else { RFP_IMPROVING_BONUS };
@@ -1018,13 +1020,19 @@ fn negamax(
         && static_eval >= beta
         && beta.abs() < MATE_SCORE - MAX_PLY as i32
         && has_non_pawn_material(board, board.side_to_move)
+        // S2-007: nunca dos null moves seguidos. Tras dos pasadas la posición
+        // vuelve a ser la del abuelo (mismo hash, contador +2) y la detección
+        // de repeticiones la puntúa 0 sin buscar: con beta >= 1 el segundo
+        // null "corta" con tablas falsas y hace fallar el null move del abuelo.
+        && !ctx.null_at[ply - 1]
     {
         ctx.ls.null_move_attempts += 1;
-        let null_r = 3 + depth / 4 + ((static_eval - beta) / tune::get(tune::NULL_DIV)).min(2);
+        let null_r = 3 + depth / tune::get(tune::NULL_DEPTH_DIV) + ((static_eval - beta) / tune::get(tune::NULL_DIV)).min(2);
         let null_board = board.make_null_move();
         ctx.tt.prefetch(null_board.hash);
         ctx.game_history.push(null_board.hash);
         let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
+        ctx.null_at[ply] = true;
         let score = -negamax(
             &null_board,
             depth - 1 - null_r,
@@ -1034,6 +1042,7 @@ fn negamax(
             &mut child_pv,
             ctx,
         );
+        ctx.null_at[ply] = false;
         ctx.pv_pool[ply + 1] = child_pv;
         ctx.game_history.pop();
         if ctx.stopped {
@@ -1200,7 +1209,7 @@ fn negamax(
     // nunca se poda (siempre se busca al menos una). Guarda anti-mate: no podar
     // si alpha está en rango de mate. Constantes de partida, a afinar por SPRT —
     // NO copiadas. Ver research/03-futility-pruning.
-    const FUTILITY_MAX_DEPTH: i32 = 4;
+    let FUTILITY_MAX_DEPTH: i32 = tune::get(tune::FUT_MAX_DEPTH);
     let FUTILITY_BASE: i32 = tune::get(tune::FUTILITY_BASE); // cp
     let FUTILITY_STEP: i32 = tune::get(tune::FUTILITY_STEP); // cp por unidad de profundidad
     let FUTILITY_IMPROVING_BONUS: i32 = tune::get(tune::FUTILITY_IMPROVING_BONUS); // colchón extra cuando mejora
@@ -1213,7 +1222,7 @@ fn negamax(
     // capturas perdedoras (SEE<0) quedan AL FINAL de la lista, así que se usa
     // `continue` solo-silenciosas, NUNCA `break`. Constantes de partida a afinar
     // por SPRT — NO copiadas. Ver research/04-late-move-pruning §8.
-    const LMP_MAX_DEPTH: i32 = 4;
+    let LMP_MAX_DEPTH: i32 = tune::get(tune::LMP_MAX_DEPTH);
     let LMP_BASE: i32 = tune::get(tune::LMP_BASE);
     const LMP_C: i32 = 1;
     const LMP_IMPROVING_BONUS: i32 = 1; // en unidades de conteo
@@ -1226,6 +1235,10 @@ fn negamax(
     let mut quiets_tried: Vec<Move> = take_buf(&mut ctx.quiet_pool, ply);
     let mut child_pv = take_buf(&mut ctx.pv_pool, ply + 1);
 
+    let SEE_PRUNE_MAX_DEPTH: i32 = tune::get(tune::SEE_PRUNE_MAX_DEPTH);
+    let SEE_PRUNE_MARGIN: i32 = tune::get(tune::SEE_PRUNE_MARGIN);
+    let LMR_HIST_GOOD: i32 = tune::get(tune::LMR_HIST_GOOD);
+    let LMR_HIST_BAD: i32 = tune::get(tune::LMR_HIST_BAD);
     let mut next_index = 0usize;
     let mut check_info: Option<crate::board::CheckInfo> = None;
     // S3-002: selección híbrida (ver `pick_next`).
@@ -1258,8 +1271,6 @@ fn negamax(
         // (100 en unidades SEE) POR ply restante no se busca: con tan pocos
         // plies no hay tiempo de recuperar ese material. Nunca la primera
         // jugada, nunca promociones, nunca si da jaque ni con alpha de mate.
-        const SEE_PRUNE_MAX_DEPTH: i32 = 4;
-        let SEE_PRUNE_MARGIN: i32 = tune::get(tune::SEE_PRUNE_MARGIN);
         if i > 0
             && beta - alpha == 1
             && !in_check
@@ -1367,7 +1378,7 @@ fn negamax(
                     // en [1000, 10000). Una unidad más de reducción cuando el
                     // historial es negativo, una menos cuando es >= 1000.
                     let hs = quiet_order_score(&mv, board, ply, ctx);
-                    if hs < 0 {
+                    if hs < LMR_HIST_BAD {
                         r += 1;
                     } else if hs >= LMR_HIST_GOOD {
                         r -= 1;
@@ -1557,6 +1568,7 @@ fn iterative_deepening_one_thread(
         stats,
         ls: LocalStats::default(),
         excluded: [None; MAX_PLY],
+        null_at: [false; MAX_PLY],
         root_depth: 1,
         ticks: 0,
         seldepth: 0,
@@ -1661,14 +1673,14 @@ fn iterative_deepening_one_thread(
         // (el umbral se estira ×5/3; nunca más allá del plazo duro).
         let soft = if score_drop >= tune::get(tune::TM_PANIC_DROP) {
             let base = limits.soft_deadline.saturating_duration_since(start);
-            (start + base * 5 / 3).min(limits.hard_deadline)
+            (start + base * tune::get(tune::TM_PANIC_12) as u32 / 12).min(limits.hard_deadline)
         } else if best_changed {
             // S2-010: la mejor jugada acaba de cambiar: la posición no está
             // resuelta. Se permite empezar otra iteración hasta 4/3 del umbral
             // (nunca más allá del plazo duro). Sin recorte en jugadas estables
             // (la causa probable del fracaso de TM-03 en el reto 24H).
             let base = limits.soft_deadline.saturating_duration_since(start);
-            (start + base * 4 / 3).min(limits.hard_deadline)
+            (start + base * tune::get(tune::TM_INSTAB_12) as u32 / 12).min(limits.hard_deadline)
         } else {
             limits.soft_deadline
         };

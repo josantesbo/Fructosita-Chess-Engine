@@ -6,7 +6,7 @@
 
 use crate::types::Color;
 
-const DEFAULT_MOVES_TO_GO: u64 = 30;
+// S4-002: jugadas restantes supuestas = `tune::TM_MOVES_TO_GO` (30).
 // CLOCK-E1. Reserva de reloj. Antes 50 ms.
 //
 // El valor se DERIVA de la medición; no se ha barrido ninguna alternativa ni se
@@ -27,7 +27,7 @@ const DEFAULT_MOVES_TO_GO: u64 = 30;
 const CLOCK_SAFETY_MS: u64 = 250;
 const MIN_CLOCK_ALLOCATION_MS: u64 = 1;
 const MOVETIME_MARGIN_MS: u64 = 5;
-const HARD_MULTIPLIER: u64 = 3;
+// S4-002: plazo duro = blando × `tune::TM_HARD_X10` / 10 (3,0).
 const INCREMENT_NUMERATOR: u64 = 4;
 const INCREMENT_DENOMINATOR: u64 = 5;
 // TM-01 (reto 24H). Umbral para EMPEZAR una iteración nueva, en % del
@@ -42,7 +42,7 @@ const INCREMENT_DENOMINATOR: u64 = 5;
 // de tiempos entre iteraciones consecutivas medido fue mediana 2,32, p75 3,03,
 // p90 4,4. Una iteración empezada antes del 60 % del presupuesto termina antes
 // del plazo duro (3x) si su cociente es <= 5 (0,6 x 5 = 3), lo que cubre el p90.
-const ITERATION_START_PCT: u64 = 60;
+// S4-002: el porcentaje es `tune::TM_START_PCT` (60).
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimeControlInput {
@@ -114,7 +114,7 @@ fn allocate_clock_time(
 ) -> TimeAllocation {
     let reserve_ms = CLOCK_SAFETY_MS.min(time_left_ms.saturating_sub(MIN_CLOCK_ALLOCATION_MS));
     let usable_ms = time_left_ms.saturating_sub(reserve_ms);
-    let moves_left = movestogo.unwrap_or(DEFAULT_MOVES_TO_GO).max(1);
+    let moves_left = movestogo.unwrap_or(crate::tune::get(crate::tune::TM_MOVES_TO_GO) as u64).max(1);
     let base_ms = usable_ms / moves_left;
     let increment_budget_ms = increment_ms
         .saturating_mul(INCREMENT_NUMERATOR)
@@ -127,8 +127,7 @@ fn allocate_clock_time(
             .saturating_add(increment_budget_ms)
             .clamp(MIN_CLOCK_ALLOCATION_MS, usable_ms)
     };
-    let hard_ms = soft_ms
-        .saturating_mul(HARD_MULTIPLIER)
+    let hard_ms = (soft_ms.saturating_mul(crate::tune::get(crate::tune::TM_HARD_X10) as u64) / 10)
         .min(usable_ms)
         .max(soft_ms);
     // TM-01: el plazo blando que se devuelve es el umbral de inicio de
@@ -137,7 +136,7 @@ fn allocate_clock_time(
     let iteration_start_ms = if soft_ms == 0 {
         0
     } else {
-        (soft_ms * ITERATION_START_PCT / 100)
+        (soft_ms * crate::tune::get(crate::tune::TM_START_PCT) as u64 / 100)
             .max(MIN_CLOCK_ALLOCATION_MS)
             .min(hard_ms)
     };
@@ -174,6 +173,11 @@ mod tests {
             infinite: false,
             ponder: false,
         }
+    }
+
+    /// S4-003: valor vigente de un parámetro de tiempo ajustable.
+    fn tm(index: usize) -> u64 {
+        crate::tune::get(index) as u64
     }
 
     fn assert_ordered(allocation: TimeAllocation) {
@@ -233,8 +237,10 @@ mod tests {
         // reserva 250 -> usable 59.750 -> 59.750/30 = 1.991 -> 1.991 + 800 = 2.791
         // TM-01: el plazo blando devuelto es el 60 % -> 2.791 * 60 / 100 = 1.674;
         // el duro sigue siendo 3 x 2.791 = 8.373.
-        assert_eq!(allocation.soft_ms, Some(1_674));
-        assert_eq!(allocation.hard_ms, Some(8_373));
+        // S4-003: con los valores por defecto de `tune` (jugadas restantes, % de inicio, plazo duro).
+        let budget = 59_750 / tm(crate::tune::TM_MOVES_TO_GO) + 800;
+        assert_eq!(allocation.soft_ms, Some(budget * tm(crate::tune::TM_START_PCT) / 100));
+        assert_eq!(allocation.hard_ms, Some(budget * tm(crate::tune::TM_HARD_X10) / 10));
         assert!(allocation.hard_ms.unwrap() < 60_000);
         assert_ordered(allocation);
     }
@@ -279,8 +285,8 @@ mod tests {
         // reserva 50  -> usable 8.950 -> 8.950/9 = 994 -> 994 + 80 = 1.074
         // reserva 250 -> usable 8.750 -> 8.750/9 = 972 -> 972 + 80 = 1.052
         // TM-01: 1.052 * 60 / 100 = 631; duro 3 x 1.052 = 3.156.
-        assert_eq!(allocation.soft_ms, Some(631));
-        assert_eq!(allocation.hard_ms, Some(3_156));
+        assert_eq!(allocation.soft_ms, Some(1_052 * tm(crate::tune::TM_START_PCT) / 100));
+        assert_eq!(allocation.hard_ms, Some(1_052 * tm(crate::tune::TM_HARD_X10) / 10));
         assert!(allocation.hard_ms.unwrap() < 9_000);
         assert_ordered(allocation);
     }
@@ -327,8 +333,9 @@ mod tests {
             winc_ms: Some(100),
             ..base_input()
         });
-        assert_eq!(allocation.soft_ms, Some(371 * 60 / 100));
-        assert_eq!(allocation.hard_ms, Some(371 * 3));
+        let budget = 8_750 / tm(crate::tune::TM_MOVES_TO_GO) + 80;
+        assert_eq!(allocation.soft_ms, Some(budget * tm(crate::tune::TM_START_PCT) / 100));
+        assert_eq!(allocation.hard_ms, Some(budget * tm(crate::tune::TM_HARD_X10) / 10));
         assert_ordered(allocation);
     }
 
