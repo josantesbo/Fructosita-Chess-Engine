@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.3.0: Faster evaluation, retuned search, Windows x64 with POPCNT support (2026-10-02)
+## 3.3.0: Faster evaluation, retuned search, Windows x64 with POPCNT support (2026-11-03)
 
 - Faster evaluation, same results: terms shared by several evaluation features are computed once per position, and everything that depends only on pawns and kings (doubled, isolated and passed pawns, king shield, open files near the king) lives in its own cache. The board keeps occupancy, material and piece-square sums up to date incrementally. Same search tree as 3.2.0 with about 13% less middlegame time.
 - Retuned search: 30 parameters tuned together with games (SPSA), 13 of them never tuned before (depth limits of near-leaf pruning, history-reduction thresholds, time allocation). The most visible changes: futility and move-count pruning reach one ply deeper, the base late-move reduction is smaller and move-count pruning starts a little earlier.
