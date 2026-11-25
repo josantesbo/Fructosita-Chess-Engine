@@ -7,6 +7,7 @@
 //! Todas estas son técnicas públicas y estándar (Chess Programming Wiki),
 //! implementadas aquí desde cero, no copiadas de ningún motor existente.
 
+use crate::bitboard::Bitboard;
 use crate::board::Board;
 use crate::tune;
 use crate::eval;
@@ -237,17 +238,46 @@ fn pawn_key(board: &Board) -> usize {
     (h >> (64 - CORR_BITS)) as usize
 }
 
+/// EXP-DUAL-0008: firma de las piezas (no peones) de un bando: el sesgo de la
+/// eval también depende de dónde están las piezas, no solo de los peones.
+#[inline]
+fn piece_key(board: &Board, color: usize) -> usize {
+    const MIX: [u64; 5] = [
+        0x9E37_79B9_7F4A_7C15,
+        0xC2B2_AE3D_27D4_EB4F,
+        0x1656_67B1_9E37_79F9,
+        0xD6E8_FEB8_6659_FD93,
+        0xA076_1D64_78BD_642F,
+    ];
+    let p = &board.pieces[color];
+    let mut h = 0u64;
+    for (i, mix) in MIX.iter().enumerate() {
+        h = (h ^ p[i + 1].wrapping_mul(*mix)).rotate_left(23);
+    }
+    (h.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> (64 - CORR_BITS)) as usize
+}
+
 #[inline]
 fn corrected_eval(board: &Board, raw: i32, ctx: &SearchContext) -> i32 {
-    let c = ctx.hist.corr[board.side_to_move.index()][pawn_key(board)] / CORR_GRAIN;
+    let stm = board.side_to_move.index();
+    let pawn = ctx.hist.corr[stm][pawn_key(board)];
+    // EXP-DUAL-0008: media de las dos tablas de piezas, sumada a la de peones.
+    let pieces = (ctx.hist.corr_pieces[stm][0][piece_key(board, 0)] + ctx.hist.corr_pieces[stm][1][piece_key(board, 1)]) / 2;
+    let c = (pawn + pieces) / CORR_GRAIN;
     (raw + c).clamp(-MATE_SCORE + MAX_PLY as i32 + 1, MATE_SCORE - MAX_PLY as i32 - 1)
 }
 
 fn update_correction(board: &Board, ctx: &mut SearchContext, depth: i32, diff: i32) {
-    let e = &mut ctx.hist.corr[board.side_to_move.index()][pawn_key(board)];
+    let stm = board.side_to_move.index();
     let w = (depth + 1).min(16);
     let target = diff.clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
-    *e = ((*e * (CORR_WEIGHT_SCALE - w) + target * w) / CORR_WEIGHT_SCALE).clamp(-CORR_MAX, CORR_MAX);
+    let blend = |e: &mut i32| {
+        *e = ((*e * (CORR_WEIGHT_SCALE - w) + target * w) / CORR_WEIGHT_SCALE).clamp(-CORR_MAX, CORR_MAX);
+    };
+    blend(&mut ctx.hist.corr[stm][pawn_key(board)]);
+    for color in 0..2 {
+        blend(&mut ctx.hist.corr_pieces[stm][color][piece_key(board, color)]);
+    }
 }
 /// EXP-0032: historiales persistentes entre búsquedas. Antes cada `go` creaba
 /// historial mariposa y continuation history a cero: lo aprendido en la jugada
@@ -262,11 +292,15 @@ struct Histories {
     eval_cache: [u64; 1 << EVAL_CACHE_BITS],
     /// S4-001: caché de peones y reyes de la eval (función pura de la estructura).
     pawn_cache: eval::PawnCache,
-    butterfly: [[[i32; 64]; 64]; 2],
+    /// EXP-DUAL-0014: el historial mariposa se separa además por si la casilla
+    /// de salida y la de llegada están atacadas por el rival (`threat_index`).
+    butterfly: [[[[i32; 64]; 64]; 4]; 2],
     cont: [[[[i16; 64]; 6]; 64]; 6],
     /// EXP-0046: correction history (EXP-0033) también persistente, sin
     /// envejecer: el sesgo de la eval para una estructura no caduca por jugada.
     corr: [[i32; 1 << CORR_BITS]; 2],
+    /// EXP-DUAL-0008: corrección por firma de piezas, `[turno][color de las piezas]`.
+    corr_pieces: [[[i32; 1 << CORR_BITS]; 2]; 2],
 }
 
 static HISTORY_POOL: std::sync::Mutex<Vec<Option<Box<Histories>>>> = std::sync::Mutex::new(Vec::new());
@@ -282,7 +316,7 @@ fn take_histories(thread_id: usize) -> Box<Histories> {
     let saved = HISTORY_POOL.lock().ok().and_then(|mut p| p.get_mut(thread_id).and_then(|x| x.take()));
     match saved {
         Some(mut h) => {
-            for c in h.butterfly.iter_mut() { for row in c.iter_mut() { for v in row.iter_mut() { *v /= 2; } } }
+            for c in h.butterfly.iter_mut() { for t in c.iter_mut() { for row in t.iter_mut() { for v in row.iter_mut() { *v /= 2; } } } }
             for a in h.cont.iter_mut() { for b in a.iter_mut() { for c in b.iter_mut() { for v in c.iter_mut() { *v /= 2; } } } }
             h
         }
@@ -337,6 +371,8 @@ struct SearchContext<'a> {
     /// nueva de la investigación 10, reutilizable después por countermove,
     /// continuation history 2/4-ply y moduladores de LMR.
     move_stack: [(PieceType, u8); MAX_PLY],
+    /// EXP-DUAL-0014: casillas atacadas por el rival en el nodo de cada ply.
+    threats: [Bitboard; MAX_PLY],
     /// Continuation history 1-ply: [pieza_previa][destino_previo][pieza][destino].
     /// 576 KB → **en heap** (`Box`), no en la pila del hilo (los hilos se lanzan
     /// con pila por defecto ~2 MB). Por hilo, como el history mariposa.
@@ -382,14 +418,16 @@ impl<'a> SearchContext<'a> {
         }
     }
 
-    fn bump_history(&mut self, color: Color, mv: Move, depth: i32) {
-        let entry = &mut self.hist.butterfly[color.index()][mv.from as usize][mv.to as usize];
+    fn bump_history(&mut self, color: Color, mv: Move, depth: i32, threats: Bitboard) {
+        let entry = &mut self.hist.butterfly[color.index()][threat_index(threats, mv)][mv.from as usize][mv.to as usize];
         *entry += depth * depth;
         if *entry > 1_000_000 {
             for c in self.hist.butterfly.iter_mut() {
-                for row in c.iter_mut() {
-                    for v in row.iter_mut() {
-                        *v /= 2;
+                for t in c.iter_mut() {
+                    for row in t.iter_mut() {
+                        for v in row.iter_mut() {
+                            *v /= 2;
+                        }
                     }
                 }
             }
@@ -401,8 +439,8 @@ impl<'a> SearchContext<'a> {
     /// "corta frente a no corta" y no solo "cuántas veces cortó", así que las
     /// jugadas que fallan de forma repetida bajan en la ordenación (y la LMR las
     /// reduce antes). Suelo en −1.000.000, simétrico al techo del bonus.
-    fn malus_history(&mut self, color: Color, mv: Move, depth: i32) {
-        let entry = &mut self.hist.butterfly[color.index()][mv.from as usize][mv.to as usize];
+    fn malus_history(&mut self, color: Color, mv: Move, depth: i32, threats: Bitboard) {
+        let entry = &mut self.hist.butterfly[color.index()][threat_index(threats, mv)][mv.from as usize][mv.to as usize];
         *entry = (*entry - depth * depth).max(-1_000_000);
     }
 
@@ -428,6 +466,19 @@ impl<'a> SearchContext<'a> {
                 }
             }
         }
+    }
+
+    /// EXP-DUAL-0005: castigo en continuation history, simétrico al del
+    /// historial mariposa (`malus_history`): la silenciosa que se buscó antes
+    /// de la que cortó y no cortó pierde depth² en la entrada (jugada previa →
+    /// esta jugada). Suelo simétrico al techo.
+    fn malus_cont_history(&mut self, ply: usize, piece: PieceType, to: u8, depth: i32) {
+        if ply == 0 {
+            return;
+        }
+        let (pp, pt) = self.move_stack[ply - 1];
+        let entry = &mut self.hist.cont[pp.index()][pt as usize][piece.index()][to as usize];
+        *entry = ((*entry as i32 - depth * depth).max(-(CONT_HISTORY_MAX as i32))) as i16;
     }
 
     /// Valor de continuation history para una jugada silenciosa en este ply.
@@ -567,8 +618,8 @@ fn move_score(
         // (investigación 10). La división entre 2 es una DECISIÓN DE INGENIERÍA
         // PROVISIONAL para conservar el rango [.., 1.000.000] y no mover ningún
         // tier de ordenación; NO es parte de la hipótesis y puede reajustarse.
-        let h = ctx.hist.butterfly[board.side_to_move.index()][mv.from as usize]
-            [mv.to as usize];
+        let h = ctx.hist.butterfly[board.side_to_move.index()][threat_index(ctx.threats[ply], *mv)]
+            [mv.from as usize][mv.to as usize];
         if !ENABLE_CONT_HISTORY {
             return h;
         }
@@ -583,6 +634,44 @@ fn move_score(
         let ch_scaled = (ch * CONT_HISTORY_SCALE).min(1_000_000);
         (h + ch_scaled) / 2
     }
+}
+
+/// EXP-DUAL-0014: todas las casillas atacadas por el bando que NO mueve.
+fn enemy_attacks(board: &Board) -> Bitboard {
+    let t = crate::bitboard::tables();
+    let them = board.side_to_move.opposite();
+    let p = &board.pieces[them.index()];
+    let occ = board.occupancy();
+    let pawns = p[PieceType::Pawn.index()];
+    const NOT_A: Bitboard = 0xFEFE_FEFE_FEFE_FEFE;
+    const NOT_H: Bitboard = 0x7F7F_7F7F_7F7F_7F7F;
+    let mut a = if them == Color::White {
+        ((pawns & NOT_A) << 7) | ((pawns & NOT_H) << 9)
+    } else {
+        ((pawns & NOT_A) >> 9) | ((pawns & NOT_H) >> 7)
+    };
+    let mut bb = p[PieceType::Knight.index()];
+    while bb != 0 {
+        a |= t.knight_attacks(bb.trailing_zeros() as u8);
+        bb &= bb - 1;
+    }
+    let mut bb = p[PieceType::Bishop.index()] | p[PieceType::Queen.index()];
+    while bb != 0 {
+        a |= t.bishop_attacks(bb.trailing_zeros() as u8, occ);
+        bb &= bb - 1;
+    }
+    let mut bb = p[PieceType::Rook.index()] | p[PieceType::Queen.index()];
+    while bb != 0 {
+        a |= t.rook_attacks(bb.trailing_zeros() as u8, occ);
+        bb &= bb - 1;
+    }
+    a | t.king_attacks(board.king_square(them))
+}
+
+/// EXP-DUAL-0014: 0..4 según estén atacadas la casilla de salida (bit 1) y la de llegada (bit 0).
+#[inline]
+fn threat_index(threats: Bitboard, mv: Move) -> usize {
+    (((threats >> mv.from) & 1) * 2 + ((threats >> mv.to) & 1)) as usize
 }
 
 /// S2-009: "¿da jaque?" calculado una vez por jugada y solo si hace falta.
@@ -607,7 +696,7 @@ fn gives_check_cached(
 /// killer ni jugada de la TT (historial mariposa combinado con continuation
 /// history). La lista ya consumió su puntuación en la selección perezosa.
 fn quiet_order_score(mv: &Move, board: &Board, ply: usize, ctx: &SearchContext) -> i32 {
-    let h = ctx.hist.butterfly[board.side_to_move.index()][mv.from as usize][mv.to as usize];
+    let h = ctx.hist.butterfly[board.side_to_move.index()][threat_index(ctx.threats[ply], *mv)][mv.from as usize][mv.to as usize];
     if !ENABLE_CONT_HISTORY {
         return h;
     }
@@ -1131,6 +1220,9 @@ fn negamax(
     // hash puede traer una jugada de otra posición. El resto se elige por
     // selección perezosa (máximo con desempate por orden de generación): el
     // mismo orden que la ordenación estable anterior, sin ordenar la lista.
+    // EXP-DUAL-0014: mapa de ataques del rival, una vez por nodo que llega al
+    // bucle de jugadas (lo usan la ordenación, la LMR y la actualización del historial).
+    ctx.threats[ply] = enemy_attacks(board);
     let us = board.side_to_move;
     let tt_first = if excluded.is_some() {
         None
@@ -1442,10 +1534,13 @@ fn negamax(
             }
             if !mv.is_capture() {
                 ctx.store_killer(ply, mv);
-                ctx.bump_history(board.side_to_move, mv, depth);
+                ctx.bump_history(board.side_to_move, mv, depth, ctx.threats[ply]);
                 for &q in quiets_tried.iter() {
                     if q != mv {
-                        ctx.malus_history(board.side_to_move, q, depth);
+                        ctx.malus_history(board.side_to_move, q, depth, ctx.threats[ply]);
+                        if let Some(p) = board.mailbox[q.from as usize] {
+                            ctx.malus_cont_history(ply, p.kind, q.to, depth);
+                        }
                     }
                 }
                 if let Some(p) = board.mailbox[mv.from as usize] {
@@ -1517,14 +1612,25 @@ fn format_score(score: i32) -> String {
     }
 }
 
-fn print_info(depth: i32, seldepth: u8, score: i32, nodes: u64, elapsed_ms: u128, pv: &[Move]) {
+fn print_info(root: &Board, depth: i32, seldepth: u8, score: i32, nodes: u64, elapsed_ms: u128, pv: &[Move]) {
     let ms = elapsed_ms.max(1);
     let nps = (nodes as u128 * 1000) / ms;
-    let pv_str = pv
-        .iter()
-        .map(|m| m.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let pv_str = if root.frc_notation() {
+        // Chess960: el enroque se escribe con la casilla de la torre, que
+        // depende de la posición; se recorre la variante sobre el tablero.
+        let mut b = *root;
+        let mut out = Vec::with_capacity(pv.len());
+        for &m in pv {
+            if b.mailbox[m.from as usize].is_none() {
+                break;
+            }
+            out.push(b.move_uci(m));
+            b = b.make_move(m);
+        }
+        out.join(" ")
+    } else {
+        pv.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(" ")
+    };
     println!(
         "info depth {depth} seldepth {seldepth} score {} nodes {nodes} nps {nps} time {ms} pv {pv_str}",
         format_score(score)
@@ -1581,6 +1687,7 @@ fn iterative_deepening_one_thread(
         hist: take_histories(thread_id),
         eval_stack: [0; MAX_PLY],
         move_stack: [(PieceType::Pawn, 0); MAX_PLY],
+        threats: [0; MAX_PLY],
         tt,
         game_history,
         move_pool: (0..MAX_PLY + 2).map(|_| Vec::with_capacity(64)).collect(),
@@ -1654,6 +1761,7 @@ fn iterative_deepening_one_thread(
             ctx.flush_stats();
             if ctx.is_main {
                 print_info(
+                    &board,
                     depth,
                     ctx.seldepth,
                     score,

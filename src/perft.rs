@@ -36,7 +36,7 @@ pub fn perft_divide(board: &Board, depth: u32) -> Vec<(String, u64)> {
             } else {
                 perft(&next, depth - 1)
             };
-            (mv.to_string(), count)
+            (board.move_uci(mv), count)
         })
         .collect()
 }

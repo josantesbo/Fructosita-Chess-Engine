@@ -10,10 +10,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-3.3.0-orange" alt="version">
+  <img src="https://img.shields.io/badge/version-3.4.0-orange" alt="version">
   <img src="https://img.shields.io/badge/Rust-2021-orange" alt="Rust">
   <img src="https://img.shields.io/badge/protocol-UCI-success" alt="UCI">
   <img src="https://img.shields.io/badge/evaluation-HCE-blue" alt="HCE">
+  <img src="https://img.shields.io/badge/variant-Chess960-blueviolet" alt="Chess960">
   <img src="https://img.shields.io/badge/license-GPL--3.0--or--later-blue" alt="License">
 </p>
 
@@ -21,7 +22,7 @@
 
 ## About
 
-**Fructosita** is an open-source chess engine written entirely from scratch in **Rust**. No code, tables or weights were copied from any other engine: every idea comes from public literature (the Chess Programming Wiki, research papers) and was implemented, tuned and measured specifically for Fructosita.
+**Fructosita** is an open-source chess engine written entirely from scratch in **Rust**. It plays standard chess and Chess960. No code, tables or weights were copied from any other engine: every idea comes from public literature (the Chess Programming Wiki, research papers) and was implemented, tuned and measured specifically for Fructosita.
 
 The project follows one rule, **learn from everyone, copy from no one**, and a second one: **no change is kept without evidence**. Every improvement is tested against its parent, and every version that claims more strength is checked on openings that were never used while developing it.
 
@@ -36,26 +37,28 @@ identity and its logo: a king merging into a hexagonal ring, where chess meets c
 > *Fructosita nació como un reto personal de un químico farmacobiólogo: aprender desde cero cómo piensa un motor
 > de ajedrez. El nombre viene de mi tesis de licenciatura sobre la fructosa.* (Antonio Espinosa)
 
-## Fructosita 3.3.0
+## Fructosita 3.4.0
 
-Fructosita 3.3.0 evaluates faster with identical results, retunes 30 search parameters and ships a statically linked executable that no longer needs the Visual C++ runtime.
+Fructosita 3.4.0 plays Chess960 (Fischer Random) from the same executable and orders moves better in both modes.
 
-### What's new since 3.2.0
+### What's new since 3.3.0
 
-- Faster evaluation, same results: terms shared by several evaluation features are computed once per position, and everything that depends only on pawns and kings (doubled, isolated and passed pawns, king shield, open files near the king) lives in its own cache. The board keeps occupancy, material and piece-square sums up to date incrementally. Same search tree as 3.2.0 with about 13% less middlegame time.
-- Retuned search: 30 parameters tuned together with games (SPSA), 13 of them never tuned before (depth limits of near-leaf pruning, history-reduction thresholds, time allocation). The most visible changes: futility and move-count pruning reach one ply deeper, the base late-move reduction is smaller and move-count pruning starts a little earlier.
-- Fix: never two null moves in a row (the second one was scored as a repetition draw without searching).
-- Build: profile-guided optimisation (about 6% faster with the same code) and the C runtime linked into the executable, so the Visual C++ redistributable is no longer needed.
+- Chess960: standard UCI option `UCI_Chess960`, positions in X-FEN or Shredder-FEN, castling with any king and rook placement, and `frc N` prints start position N. The rules were checked by perft against two independent references on all 960 start positions and on thousands of test positions without a mismatch, and in more than 4,000 games against itself and other engines without a single illegal move. In standard chess the engine behaves the same with the option on or off.
+- Search, both modes: quiet moves tried before the refuting move also lose points in the continuation history; the static evaluation is also corrected by each side's piece placement (before, only by pawns); and the move history distinguishes whether the piece leaves an attacked square and whether it lands on one.
+- Profile-guided optimisation and static linking, as in 3.3.0.
 
 ### Evidence
 
-- Sealed holdout vs 3.2.0: **+44.0 ± 13.8 Elo**, 1,000 games at 10+0.1, no early stop (+324 −198 =478). No time forfeits or illegal moves.
-- During development (SPRT at 5+0.05): speed changes +23.8 ± 12.9 Elo in 1,096 games; retuned search +11.3 ± 8.3 Elo in 3,118 games.
-- Gauntlet at 10+0.1 against Cheese 3.3.0, Critter 1.6a and Equinox 3.30, 228 games each, anchored to their CCRL Blitz ratings of 2026-09-26: 3.2.0 about 2975 (95% CI 2929 to 3017), 3.3.0 about 3041 (95% CI 2998 to 3083). Short time control on my own hardware, so this is an estimate and **not a CCRL rating**.
+- Sealed holdout vs 3.3.0, standard chess: **+18.1 ± 13.9 Elo**, 1,000 games at 10+0.1, no early stop (+266 −214 =520). No time forfeits or illegal moves.
+- Sealed Chess960 positions vs the first Chess960 build (3.3.0 search): **+59.3 ± 15.3 Elo**, 1,000 games at 10+0.1 (+344 −175 =481), no incidents. That reference was not built with PGO, so about 8 to 10 Elo of the figure comes from the build.
+- During development (SPRT at 5+0.05): continuation-history malus plus piece-placement correction +22.5 ± 13.0 Elo in 1,252 games; threat-aware move history +10.8 ± 8.1 Elo in 3,302 games.
+- Gauntlet at 10+0.1, 200 games per opponent and mode. Standard: +158 vs Cheese 3.3.0, +106 vs Bobcat 8.0, −151 vs Critter 1.6a, +235 vs Spike 1.4.2, +326 vs Daydreamer 2.0.0-pre2; performance about 3064 (95% CI 3038 to 3091) with the CCRL Blitz ratings of Cheese (2959) and Critter (3163) of 2026-11-21. Chess960: +83, +160, −217, +228, +207 against the same engines; performance about 3096 (95% CI 3074 to 3118) with the CCRL 40/2 FRC list of 2026-10-04. Short time control on my own hardware: **not a CCRL rating**, and the two lists are different scales.
+- Estimated rating: CCRL Blitz rates 3.3.0 at **3114** (840 games, list of 2026-11-21). Adding the gain measured over 3.3.0, I expect 3.4.0 around **3130** on that list. This is my estimate, **not a CCRL rating**.
 
 ### Known limitations
 
-- With a "moves to go" time control and two moves left, the engine may spend almost the entire clock on the penultimate move.
+- With a "moves to go" time control and two moves left, the engine can spend almost the whole clock on the penultimate move. It does not lose on time (300 games at 40 moves in 10 s, repeating, without incident), but the last move of the control may get very little time.
+- Twelve other ideas were tested and rejected in the same stage, including an automatic retune of 32 parameters that played worse.
 
 ## Strength
 
@@ -68,8 +71,10 @@ Fructosita 3.3.0 evaluates faster with identical results, retunes 30 search para
 | 3.1.0 | 3.0.0 | **+21.6 ± 14.4 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
 | 3.2.0 | 3.1.0 | **+62.5 ± 13.9 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
 | 3.3.0 | 3.2.0 | **+44.0 ± 13.8 Elo** | 1,000 games, 10+0.1, **sealed holdout openings** |
+| 3.4.0 | 3.3.0 | **+18.1 ± 13.9 Elo** (standard) | 1,000 games, 10+0.1, **sealed holdout openings** |
+| 3.4.0 | first Chess960 build | **+59.3 ± 15.3 Elo** (Chess960) | 1,000 games, 10+0.1, **sealed Chess960 positions** |
 
-Self-play Elo overstates the gap seen in rating lists; independent ratings (CCRL) are the reference.
+Self-play Elo overstates the gap seen in rating lists; independent ratings (CCRL) are the reference. CCRL Blitz, list of 2026-11-21: 2.0.0 **2930**, 3.0.0 **3017**, 3.3.0 **3114**.
 
 ## Features
 
@@ -78,7 +83,8 @@ Self-play Elo overstates the gap seen in rating lists; independent ratings (CCRL
 - Transposition table: lock-less, 16-byte entries, prefetch; TT move tried before move generation; a good move is kept when only an upper bound is stored
 - Null-move pruning (adaptive), reverse futility, futility, razoring, ProbCut, late-move pruning, SEE pruning
 - Logarithmic late-move reductions (also guided by the move's history), internal iterative reductions, check and **singular extensions**
-- History and continuation history, killers, **static-evaluation correction history**
+- History and continuation history (with a malus for quiet moves tried before the cutoff), killers, **static-evaluation correction history** keyed by pawns and by each side's piece placement
+- Move history that knows whether the piece leaves or lands on an attacked square
 - Search statistics **persist between moves** (history, correction and evaluation caches)
 - Lazy SMP, time management with panic time on score drops
 
@@ -91,15 +97,16 @@ Self-play Elo overstates the gap seen in rating lists; independent ratings (CCRL
 - Pawn and king terms kept in their own cache; occupancy, material and piece-square sums updated incrementally
 
 **Engine**
-- UCI: `Hash`, `Threads`, `OwnBook`, `BookFile`, `Clear Hash`, `go infinite/ponder/nodes/depth/movetime`
+- UCI: `Hash`, `Threads`, `OwnBook`, `BookFile`, `Clear Hash`, `UCI_Chess960`, `go infinite/ponder/nodes/depth/movetime`
+- **Chess960** (Fischer Random) in the same executable: X-FEN and Shredder-FEN, castling with any king and rook placement
 - Polyglot opening book support
-- Built-in tools: `perft`, `bench`, EPD test harness, Texel tuner
+- Built-in tools: `perft`, `bench`, EPD test harness, Texel tuner, `frc N` (Chess960 start positions)
 - Release executable built with profile-guided optimisation and the C runtime linked in (no Visual C++ redistributable needed)
 
 ## Usage
 
 Fructosita is a UCI engine: load the executable in any UCI GUI (Arena, Cute Chess, Banksia GUI, ChessBase, ...).
-It identifies itself as `id name Fructosita 3.3.0`.
+It identifies itself as `id name Fructosita 3.4.0`.
 
 | Option | Default | Notes |
 |---|---|---|
@@ -107,6 +114,7 @@ It identifies itself as `id name Fructosita 3.3.0`.
 | `Threads` | 1 | Lazy SMP |
 | `OwnBook` | true | Only used when `BookFile` is set (Polyglot book); no file, no book |
 | `BookFile` | empty | Path of a Polyglot book |
+| `UCI_Chess960` | false | Chess960 notation (castling as king takes rook); GUIs set it automatically |
 | `Clear Hash` |  | Button |
 
 Other options (`RfpMargin`, `LmrBase`, ...) are internal search parameters exposed for testing and tuning; leave them at their defaults.
@@ -117,7 +125,13 @@ fructosita.exe bench        # deterministic benchmark (node count and signature)
 fructosita.exe perft 5      # move-generator self-check
 ```
 
-`fructosita.exe bench depth 12` ends with `bench signature b5eed34762ad6df9`.
+`fructosita.exe bench depth 12` ends with `bench signature b5d90d2a54f488fd`.
+
+### Chess960
+
+- Standard `UCI_Chess960` option; positions in X-FEN (`KQkq` = outermost rook) or Shredder-FEN (`HAha`, file letters).
+- With the option on, castling is sent and read as king to rook square (`e1h1`); with it off and a standard position, as usual (`e1g1`).
+- `fructosita.exe frc N` prints start position N (0 to 959, Scharnagl numbering; 518 is the standard position).
 
 ## Building
 
@@ -128,7 +142,7 @@ cargo test --release --locked
 
 The binary is written to `target/release/fructosita(.exe)`. Requires a recent stable Rust toolchain.
 
-`.cargo/config.toml` enables POPCNT and links the C runtime statically. The executable attached to the release is built with profile-guided optimisation; the profile (`fructosita-3.3.0.profdata`) is attached too. A plain `cargo build` plays exactly the same moves, a few percent slower.
+`.cargo/config.toml` enables POPCNT and links the C runtime statically. The executable attached to the release is built with profile-guided optimisation; the profile (`fructosita-3.4.0.profdata`) is attached too. A plain `cargo build` plays exactly the same moves, a few percent slower.
 
 ## Requirements
 

@@ -140,53 +140,110 @@ fn generate_sliding_moves(board: &Board, piece: PieceType, moves: &mut Vec<Move>
     }
 }
 
+/// Geometría de un enroque sobre la primera fila, como máscaras de columnas
+/// (bit 0 = columna a): `empty` son las casillas que deben estar vacías y
+/// `path` las que el rey ocupa o cruza (salida y llegada incluidas).
+#[derive(Clone, Copy)]
+struct CastleGeometry {
+    empty: u8,
+    path: u8,
+}
+
+/// Columnas de `a` a `b`, ambas incluidas, en cualquier orden.
+const fn file_span(a: usize, b: usize) -> u8 {
+    let (lo, hi) = if a < b { (a, b) } else { (b, a) };
+    (((1u16 << (hi + 1)) - 1) as u8) & !(((1u16 << lo) - 1) as u8)
+}
+
+/// `[largo][columna del rey][columna de la torre]`. El rey llega a g (corto) o
+/// c (largo) y la torre a f o d, estén donde estén.
+const CASTLE_GEOMETRY: [[[CastleGeometry; 8]; 8]; 2] = {
+    let mut table = [[[CastleGeometry { empty: 0, path: 0 }; 8]; 8]; 2];
+    let mut side = 0;
+    while side < 2 {
+        let (king_to, rook_to) = if side == 1 { (2, 3) } else { (6, 5) };
+        let mut kf = 0;
+        while kf < 8 {
+            let mut rf = 0;
+            while rf < 8 {
+                let path = file_span(kf, king_to);
+                let empty = (path | file_span(rf, rook_to)) & !(1u8 << kf) & !(1u8 << rf);
+                table[side][kf][rf] = CastleGeometry { empty, path };
+                rf += 1;
+            }
+            kf += 1;
+        }
+        side += 1;
+    }
+    table
+};
+
+/// Enroque, con las reglas de Chess960 (el ajedrez estándar es el caso rey
+/// en e1/e8 y torres en a/h). Para cada derecho que se conserva:
+///
+/// 1. El rey llega a la columna g (corto) o c (largo) y la torre a f o d.
+/// 2. Todas las casillas entre el rey y su llegada y entre la torre y la suya,
+///    llegadas incluidas, deben estar vacías salvo por el propio rey y la
+///    propia torre que enroca (pueden cruzarse o no moverse).
+/// 3. Ni la casilla del rey, ni las que cruza, ni la de llegada pueden estar
+///    atacadas.
+/// 4. Al salir, la torre puede dejar de tapar a un deslizante rival en la
+///    primera fila (torre en b1, rey que llega a c1, dama rival en a1): la
+///    casilla de llegada se comprueba además con la ocupación final. Con la
+///    torre en la esquina no hay nada detrás de ella y se omite.
+///
+/// La jugada se guarda como rey → casilla de llegada del rey.
 fn generate_castling(board: &Board, moves: &mut Vec<Move>) {
     let us = board.side_to_move;
-    let occ = board.occupancy();
-    let enemy = us.opposite();
-
-    let (king_home, kingside_right, queenside_right, f, g, d, c, b) = match us {
-        Color::White => (
-            E1,
-            board.castling.white_kingside,
-            board.castling.white_queenside,
-            F1,
-            G1,
-            D1,
-            C1,
-            B1,
-        ),
-        Color::Black => (
-            E8,
-            board.castling.black_kingside,
-            board.castling.black_queenside,
-            F8,
-            G8,
-            D8,
-            C8,
-            B8,
-        ),
+    let (kingside_right, queenside_right) = match us {
+        Color::White => (board.castling.white_kingside, board.castling.white_queenside),
+        Color::Black => (board.castling.black_kingside, board.castling.black_queenside),
     };
-
-    if kingside_right
-        && !get_bit(occ, f)
-        && !get_bit(occ, g)
-        && !board.is_square_attacked(king_home, enemy)
-        && !board.is_square_attacked(f, enemy)
-        && !board.is_square_attacked(g, enemy)
-    {
-        moves.push(Move::new(king_home, g, MoveKind::CastleKingside));
+    if !(kingside_right || queenside_right) {
+        return;
     }
+    let ui = us.index();
+    let enemy = us.opposite();
+    let occ = board.occupancy();
+    let base: Square = if us == Color::White { 0 } else { 56 };
+    let king_from = board.king_square(us);
+    let king_file = file_of(king_from) as usize;
 
-    if queenside_right
-        && !get_bit(occ, d)
-        && !get_bit(occ, c)
-        && !get_bit(occ, b)
-        && !board.is_square_attacked(king_home, enemy)
-        && !board.is_square_attacked(d, enemy)
-        && !board.is_square_attacked(c, enemy)
-    {
-        moves.push(Move::new(king_home, c, MoveKind::CastleQueenside));
+    for (right, queenside) in [(kingside_right, false), (queenside_right, true)] {
+        if !right {
+            continue;
+        }
+        let rook_from = board.castle_rooks[ui * 2 + usize::from(queenside)];
+        let rook_file = file_of(rook_from) as usize;
+        let geometry = CASTLE_GEOMETRY[usize::from(queenside)][king_file][rook_file];
+        if occ & ((geometry.empty as Bitboard) << base) != EMPTY {
+            continue;
+        }
+        let mut walk = (geometry.path as Bitboard) << base;
+        let mut attacked = false;
+        while walk != EMPTY {
+            if board.is_square_attacked(pop_lsb(&mut walk), enemy) {
+                attacked = true;
+                break;
+            }
+        }
+        if attacked {
+            continue;
+        }
+        let (king_to, rook_to) = if queenside { (base + 2, base + 3) } else { (base + 6, base + 5) };
+        if rook_file != if queenside { 0 } else { 7 } {
+            let ei = enemy.index();
+            let enemy_rq =
+                board.pieces[ei][PieceType::Rook.index()] | board.pieces[ei][PieceType::Queen.index()];
+            let occ_after = (occ & !(set_bit(EMPTY, king_from) | set_bit(EMPTY, rook_from)))
+                | set_bit(EMPTY, king_to)
+                | set_bit(EMPTY, rook_to);
+            if tables().rook_attacks(king_to, occ_after) & enemy_rq != EMPTY {
+                continue;
+            }
+        }
+        let kind = if queenside { MoveKind::CastleQueenside } else { MoveKind::CastleKingside };
+        moves.push(Move::new(king_from, king_to, kind));
     }
 }
 
@@ -615,9 +672,22 @@ pub fn is_pseudo_legal(board: &Board, mv: Move) -> bool {
 /// Busca, entre los movimientos legales, el que corresponde a la notación
 /// UCI dada (p. ej. "e2e4", "e7e8q"). Útil para procesar `position ... moves ...`.
 pub fn find_move(board: &Board, uci_str: &str) -> Option<Move> {
-    generate_legal_moves(board)
-        .into_iter()
-        .find(|mv| mv.to_string() == uci_str)
+    let legal = generate_legal_moves(board);
+    if let Some(mv) = legal.iter().copied().find(|&mv| board.move_uci(mv) == uci_str) {
+        return Some(mv);
+    }
+    // Enroque escrito con la otra convención. "Rey captura torre" (e1h1) no
+    // puede confundirse nunca con otra jugada legal; la casilla de llegada del
+    // rey (e1g1) solo se admite con la disposición estándar, donde tampoco.
+    let us = board.side_to_move.index();
+    let classic_ok = !board.frc_geometry();
+    legal.into_iter().find(|&mv| {
+        mv.is_castle() && {
+            let rook = board.castle_rooks[us * 2 + usize::from(mv.kind == MoveKind::CastleQueenside)];
+            format!("{}{}", square_to_str(mv.from), square_to_str(rook)) == uci_str
+                || (classic_ok && mv.to_string() == uci_str)
+        }
+    })
 }
 
 #[cfg(test)]
