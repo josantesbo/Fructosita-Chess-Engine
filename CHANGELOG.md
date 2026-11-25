@@ -1,5 +1,26 @@
 # Changelog
 
+## 3.4.0: Chess960 in the same executable and a better-ordered search (2026-11-25)
+
+- Chess960: standard UCI option `UCI_Chess960`, positions in X-FEN or Shredder-FEN, castling with any king and rook placement, and `frc N` prints start position N. The rules were checked by perft against two independent references on all 960 start positions and on thousands of test positions without a mismatch, and in more than 4,000 games against itself and other engines without a single illegal move. In standard chess the engine behaves the same with the option on or off.
+- Search, both modes: quiet moves tried before the refuting move also lose points in the continuation history; the static evaluation is also corrected by each side's piece placement (before, only by pawns); and the move history distinguishes whether the piece leaves an attacked square and whether it lands on one.
+- Profile-guided optimisation and static linking, as in 3.3.0.
+
+Evidence:
+
+- Sealed holdout vs 3.3.0, standard chess: **+18.1 ± 13.9 Elo**, 1,000 games at 10+0.1, no early stop (+266 −214 =520). No time forfeits or illegal moves.
+- Sealed Chess960 positions vs the first Chess960 build (3.3.0 search): **+59.3 ± 15.3 Elo**, 1,000 games at 10+0.1 (+344 −175 =481), no incidents. That reference was not built with PGO, so about 8 to 10 Elo of the figure comes from the build.
+- During development (SPRT at 5+0.05): continuation-history malus plus piece-placement correction +22.5 ± 13.0 Elo in 1,252 games; threat-aware move history +10.8 ± 8.1 Elo in 3,302 games.
+- Gauntlet at 10+0.1, 200 games per opponent and mode. Standard: +158 vs Cheese 3.3.0, +106 vs Bobcat 8.0, −151 vs Critter 1.6a, +235 vs Spike 1.4.2, +326 vs Daydreamer 2.0.0-pre2; performance about 3064 (95% CI 3038 to 3091) with the CCRL Blitz ratings of Cheese (2959) and Critter (3163) of 2026-11-21. Chess960: +83, +160, −217, +228, +207 against the same engines; performance about 3096 (95% CI 3074 to 3118) with the CCRL 40/2 FRC list of 2026-10-04. Short time control on my own hardware: **not a CCRL rating**, and the two lists are different scales.
+- Estimated rating: CCRL Blitz rates 3.3.0 at **3114** (840 games, list of 2026-11-21). Adding the gain measured over 3.3.0, I expect 3.4.0 around **3130** on that list. This is my estimate, **not a CCRL rating**.
+
+Known limitations:
+
+- With a "moves to go" time control and two moves left, the engine can spend almost the whole clock on the penultimate move. It does not lose on time (300 games at 40 moves in 10 s, repeating, without incident), but the last move of the control may get very little time.
+- Twelve other ideas were tested and rejected in the same stage, including an automatic retune of 32 parameters that played worse.
+
+Bench signatures: depth 10 `b5cb09b5e62201e0`; depth 12 `b5d90d2a54f488fd`. Windows x64 and a CPU with POPCNT (a processor that supports the POPCNT instruction). On a CPU without POPCNT the engine prints a message and exits.
+
 ## 3.3.0: Faster evaluation, retuned search, Windows x64 with POPCNT support (2026-11-03)
 
 - Faster evaluation, same results: terms shared by several evaluation features are computed once per position, and everything that depends only on pawns and kings (doubled, isolated and passed pawns, king shield, open files near the king) lives in its own cache. The board keeps occupancy, material and piece-square sums up to date incrementally. Same search tree as 3.2.0 with about 13% less middlegame time.

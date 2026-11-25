@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-pub const ENGINE_NAME: &str = "Fructosita 3.2.0";
+pub const ENGINE_NAME: &str = "Fructosita 3.4.0";
 pub const ENGINE_AUTHOR: &str = "Antonio Espinosa";
 const DEFAULT_HASH_MB: usize = 64;
 const DEFAULT_THREADS: usize = 1;
@@ -100,6 +100,7 @@ pub fn run() {
                 println!("option name OwnBook type check default true");
                 println!("option name BookFile type string default <empty>");
                 println!("option name Clear Hash type button");
+                println!("option name UCI_Chess960 type check default false");
                 for p in crate::tune::PARAMS {
                     println!("option name {} type spin default {} min {} max {}", p.name, p.default, p.min, p.max);
                 }
@@ -234,6 +235,8 @@ fn handle_setoption(line: &str, state: &mut EngineState) {
         if let Ok(n) = value.parse::<usize>() {
             state.threads = n.clamp(1, 64);
         }
+    } else if name.eq_ignore_ascii_case("UCI_Chess960") {
+        crate::chess960::set_enabled(value.eq_ignore_ascii_case("true"));
     } else if name.eq_ignore_ascii_case("OwnBook") {
         state.own_book = value.eq_ignore_ascii_case("true");
     } else if name.eq_ignore_ascii_case("BookFile") {
@@ -268,7 +271,8 @@ fn handle_go(line: &str, state: &mut EngineState) {
         return;
     }
 
-    if state.own_book {
+    // El libro Polyglot solo describe ajedrez estándar.
+    if state.own_book && !state.board.frc_notation() {
         if let Some(book) = &state.book {
             let candidates = book.probe(&state.board);
             if let Some(mv) = crate::book::choose_weighted(&candidates, &mut state.book_rng) {
@@ -382,7 +386,7 @@ fn handle_go(line: &str, state: &mut EngineState) {
         while wait_for_stop && !stop_flag.load(Ordering::Relaxed) {
             thread::sleep(Duration::from_millis(1));
         }
-        println!("bestmove {best_move}");
+        println!("bestmove {}", board.move_uci(best_move));
         io::stdout().flush().ok();
     });
     state.search_thread = Some(handle);

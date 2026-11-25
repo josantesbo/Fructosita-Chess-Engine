@@ -8,6 +8,7 @@
 //!     fructosita perft 5
 //!     fructosita perft 4 "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"
 //!     fructosita bench [depth <profundidad>]
+//!     fructosita frc <0..959>      (FEN de una posición inicial de Chess960)
 //!     fructosita selfplay <plies> [movetime_ms] [threads]
 //!         Hace que el motor juegue contra sí mismo N medio-movimientos,
 //!         verificando en cada paso que el movimiento elegido es legal.
@@ -19,6 +20,9 @@
 mod bitboard;
 mod board;
 mod book;
+mod chess960;
+#[cfg(test)]
+mod chess960_tests;
 mod commands;
 mod epd;
 mod eval;
@@ -69,6 +73,13 @@ fn main() {
         Some("texel-error") => commands::run_texel_error(&args[2..]),
         Some("selfplay") => commands::run_selfplay(&args[2..]),
         Some("bench-attacks") => commands::run_bench_attacks(),
+        Some("frc") => {
+            // FEN de la posición inicial Chess960 número N (Scharnagl, 0..959).
+            match args.get(2).and_then(|s| s.parse().ok()).and_then(chess960::start_fen) {
+                Some(fen) => println!("{fen}"),
+                None => eprintln!("uso: fructosita frc <0..959>"),
+            }
+        }
         _ => uci::run(),
     }
 }

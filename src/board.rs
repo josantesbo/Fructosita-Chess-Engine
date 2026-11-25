@@ -44,6 +44,11 @@ pub struct Board {
     /// S4-001: material + PST con los pesos por defecto, blancas − negras
     /// (medio juego, final), mantenido en `make_move` (ver `eval::psq_table`).
     pub psq: (i32, i32),
+    /// Chess960: casilla de la torre de cada derecho de enroque, en el orden
+    /// de las claves Zobrist (blancas corto, blancas largo, negras corto,
+    /// negras largo). Solo tiene significado mientras el derecho existe; en
+    /// ajedrez estándar vale siempre h1, a1, h8, a8.
+    pub castle_rooks: [Square; 4],
 }
 
 /// S3-002: ver `Board::check_info`.
@@ -109,15 +114,47 @@ impl Board {
             other => return Err(format!("Color de turno FEN inválido: {other}")),
         };
 
+        // Derechos de enroque. Se aceptan las dos escrituras en uso: "KQkq"
+        // (FEN clásico y X-FEN: la torre más exterior de ese lado del rey) y
+        // la columna de la torre, "HAha" (Shredder-FEN). Un derecho sin rey en
+        // su primera fila o sin torre propia en esa casilla no puede ejercerse
+        // nunca y se descarta.
         let mut castling = CastlingRights::default();
+        let mut castle_rooks = [H1, A1, H8, A8];
         if parts[2] != "-" {
             for c in parts[2].chars() {
-                match c {
-                    'K' => castling.white_kingside = true,
-                    'Q' => castling.white_queenside = true,
-                    'k' => castling.black_kingside = true,
-                    'q' => castling.black_queenside = true,
-                    _ => return Err(format!("Derecho de enroque FEN inválido: {c}")),
+                let lower = c.to_ascii_lowercase();
+                if !matches!(lower, 'k' | 'q' | 'a'..='h') {
+                    return Err(format!("Derecho de enroque FEN inválido: {c}"));
+                }
+                let color = if c.is_ascii_uppercase() { Color::White } else { Color::Black };
+                let ci = color.index();
+                let base: Square = if color == Color::White { 0 } else { 56 };
+                let king_bb = pieces[ci][PieceType::King.index()];
+                if king_bb == EMPTY {
+                    continue;
+                }
+                let ksq = king_bb.trailing_zeros() as Square;
+                if ksq < base || ksq > base + 7 {
+                    continue;
+                }
+                let kf = file_of(ksq);
+                let rook_files = ((pieces[ci][PieceType::Rook.index()] >> base) & 0xFF) as u8;
+                let rook_file = match lower {
+                    'k' => (kf + 1..8).rev().find(|&f| rook_files >> f & 1 == 1),
+                    'q' => (0..kf).find(|&f| rook_files >> f & 1 == 1),
+                    letter => Some(letter as u8 - b'a').filter(|&f| f != kf && rook_files >> f & 1 == 1),
+                };
+                let Some(rf) = rook_file else {
+                    continue;
+                };
+                let idx = ci * 2 + usize::from(rf < kf);
+                castle_rooks[idx] = base + rf;
+                match idx {
+                    0 => castling.white_kingside = true,
+                    1 => castling.white_queenside = true,
+                    2 => castling.black_kingside = true,
+                    _ => castling.black_queenside = true,
                 }
             }
         }
@@ -183,6 +220,7 @@ impl Board {
             hash,
             occ,
             psq,
+            castle_rooks,
         })
     }
 
@@ -222,17 +260,20 @@ impl Board {
         if !(c.white_kingside || c.white_queenside || c.black_kingside || c.black_queenside) {
             s.push('-');
         } else {
-            if c.white_kingside {
-                s.push('K');
-            }
-            if c.white_queenside {
-                s.push('Q');
-            }
-            if c.black_kingside {
-                s.push('k');
-            }
-            if c.black_queenside {
-                s.push('q');
+            // Con notación Chess960 se escribe la columna de cada torre
+            // (Shredder-FEN); si no, el "KQkq" de siempre.
+            let frc = self.frc_notation();
+            let rights = [c.white_kingside, c.white_queenside, c.black_kingside, c.black_queenside];
+            for (i, classic) in ['K', 'Q', 'k', 'q'].into_iter().enumerate() {
+                if !rights[i] {
+                    continue;
+                }
+                if frc {
+                    let letter = (b'a' + file_of(self.castle_rooks[i])) as char;
+                    s.push(if i < 2 { letter.to_ascii_uppercase() } else { letter });
+                } else {
+                    s.push(classic);
+                }
             }
         }
         s.push(' ');
@@ -247,6 +288,40 @@ impl Board {
         s.push(' ');
         s.push_str(&self.fullmove_number.to_string());
         s
+    }
+
+    /// ¿Hay algún derecho de enroque con el rey fuera de la columna e o la
+    /// torre fuera de las columnas a/h? Entonces la notación clásica del
+    /// enroque (e1g1) no sirve: puede coincidir con un paso normal del rey.
+    pub fn frc_geometry(&self) -> bool {
+        let c = &self.castling;
+        let r = &self.castle_rooks;
+        let white = c.white_kingside || c.white_queenside;
+        let black = c.black_kingside || c.black_queenside;
+        (white && self.king_square(Color::White) != E1)
+            || (black && self.king_square(Color::Black) != E8)
+            || (c.white_kingside && r[0] != H1)
+            || (c.white_queenside && r[1] != A1)
+            || (c.black_kingside && r[2] != H8)
+            || (c.black_queenside && r[3] != A8)
+    }
+
+    /// ¿Se escriben los enroques y los FEN con la convención Chess960? Sí si
+    /// la interfaz lo pidió (`UCI_Chess960`) o si la posición lo exige.
+    pub fn frc_notation(&self) -> bool {
+        crate::chess960::enabled() || self.frc_geometry()
+    }
+
+    /// Jugada en notación UCI. El enroque en Chess960 se escribe "el rey
+    /// captura su torre" (convención de `UCI_Chess960`): e1h1, b1a1…; en
+    /// ajedrez estándar, con la casilla de llegada del rey: e1g1.
+    pub fn move_uci(&self, mv: Move) -> String {
+        if mv.is_castle() && self.frc_notation() {
+            let idx = self.side_to_move.index() * 2 + usize::from(mv.kind == MoveKind::CastleQueenside);
+            format!("{}{}", square_to_str(mv.from), square_to_str(self.castle_rooks[idx]))
+        } else {
+            mv.to_string()
+        }
     }
 
     #[inline]
@@ -404,6 +479,9 @@ impl Board {
     /// menos pseudo-legal en `self` (no valida legalidad por jaque; eso lo
     /// hace el generador de movimientos llamando a `in_check` después).
     pub fn make_move(&self, mv: Move) -> Board {
+        if mv.is_castle() {
+            return self.make_castle(mv);
+        }
         let mut b = *self;
         let us = self.side_to_move;
         let them = us.opposite();
@@ -486,44 +564,6 @@ impl Board {
                 b.en_passant = Some(ep_sq);
                 b.hash ^= keys.en_passant_file[file_of(ep_sq) as usize];
             }
-            MoveKind::CastleKingside => {
-                let (rook_from, rook_to) = if us == Color::White {
-                    (H1, F1)
-                } else {
-                    (H8, F8)
-                };
-                b.pieces[us.index()][PieceType::Rook.index()] =
-                    clear_bit(b.pieces[us.index()][PieceType::Rook.index()], rook_from);
-                b.pieces[us.index()][PieceType::Rook.index()] =
-                    set_bit(b.pieces[us.index()][PieceType::Rook.index()], rook_to);
-                b.mailbox[rook_from as usize] = None;
-                b.mailbox[rook_to as usize] = Some(Piece::new(us, PieceType::Rook));
-                b.hash ^= keys.piece(us, PieceType::Rook, rook_from);
-                b.hash ^= keys.piece(us, PieceType::Rook, rook_to);
-                b.occ[ui] ^= (1u64 << rook_from) | (1u64 << rook_to);
-                let (a, z) = (psq[ui][PieceType::Rook.index()][rook_from as usize], psq[ui][PieceType::Rook.index()][rook_to as usize]);
-                b.psq.0 += z.0 - a.0;
-                b.psq.1 += z.1 - a.1;
-            }
-            MoveKind::CastleQueenside => {
-                let (rook_from, rook_to) = if us == Color::White {
-                    (A1, D1)
-                } else {
-                    (A8, D8)
-                };
-                b.pieces[us.index()][PieceType::Rook.index()] =
-                    clear_bit(b.pieces[us.index()][PieceType::Rook.index()], rook_from);
-                b.pieces[us.index()][PieceType::Rook.index()] =
-                    set_bit(b.pieces[us.index()][PieceType::Rook.index()], rook_to);
-                b.mailbox[rook_from as usize] = None;
-                b.mailbox[rook_to as usize] = Some(Piece::new(us, PieceType::Rook));
-                b.hash ^= keys.piece(us, PieceType::Rook, rook_from);
-                b.hash ^= keys.piece(us, PieceType::Rook, rook_to);
-                b.occ[ui] ^= (1u64 << rook_from) | (1u64 << rook_to);
-                let (a, z) = (psq[ui][PieceType::Rook.index()][rook_from as usize], psq[ui][PieceType::Rook.index()][rook_to as usize]);
-                b.psq.0 += z.0 - a.0;
-                b.psq.1 += z.1 - a.1;
-            }
             _ => {}
         }
 
@@ -541,16 +581,17 @@ impl Board {
         // Cubre tanto "la torre se movió desde su casilla original" como
         // "capturaron una torre en su casilla original" (en cuyo caso
         // `mv.to` coincide, sin importar de quién sea el turno).
-        if mv.from == A1 || mv.to == A1 {
+        let [wk_rook, wq_rook, bk_rook, bq_rook] = self.castle_rooks;
+        if mv.from == wq_rook || mv.to == wq_rook {
             b.castling.white_queenside = false;
         }
-        if mv.from == H1 || mv.to == H1 {
+        if mv.from == wk_rook || mv.to == wk_rook {
             b.castling.white_kingside = false;
         }
-        if mv.from == A8 || mv.to == A8 {
+        if mv.from == bq_rook || mv.to == bq_rook {
             b.castling.black_queenside = false;
         }
-        if mv.from == H8 || mv.to == H8 {
+        if mv.from == bk_rook || mv.to == bk_rook {
             b.castling.black_kingside = false;
         }
 
@@ -574,6 +615,75 @@ impl Board {
         b.side_to_move = them;
         b.hash ^= keys.side_to_move;
 
+        b
+    }
+
+    /// Enroque (estándar y Chess960). `mv.from` es la casilla del rey y
+    /// `mv.to` su casilla de llegada (columna g o c); la torre sale de
+    /// `castle_rooks` y llega a la columna f o d. En Chess960 cualquiera de
+    /// las dos piezas puede no moverse, y la casilla de llegada de una puede
+    /// ser la de salida de la otra: por eso primero se retiran las dos y
+    /// después se colocan las dos.
+    fn make_castle(&self, mv: Move) -> Board {
+        let mut b = *self;
+        let us = self.side_to_move;
+        let ui = us.index();
+        let keys = zobrist::keys();
+        let psq = crate::eval::psq_table();
+        let (king, rook) = (PieceType::King.index(), PieceType::Rook.index());
+        let queenside = mv.kind == MoveKind::CastleQueenside;
+        let base: Square = if us == Color::White { 0 } else { 56 };
+        let (king_from, king_to) = (mv.from, mv.to);
+        let rook_from = self.castle_rooks[ui * 2 + usize::from(queenside)];
+        let rook_to = base + if queenside { 3 } else { 5 };
+
+        if let Some(old_ep) = self.en_passant {
+            b.hash ^= keys.en_passant_file[file_of(old_ep) as usize];
+        }
+        b.en_passant = None;
+        b.halfmove_clock += 1;
+
+        b.pieces[ui][king] = set_bit(clear_bit(b.pieces[ui][king], king_from), king_to);
+        b.pieces[ui][rook] = set_bit(clear_bit(b.pieces[ui][rook], rook_from), rook_to);
+        b.mailbox[king_from as usize] = None;
+        b.mailbox[rook_from as usize] = None;
+        b.mailbox[king_to as usize] = Some(Piece::new(us, PieceType::King));
+        b.mailbox[rook_to as usize] = Some(Piece::new(us, PieceType::Rook));
+        b.occ[ui] = (b.occ[ui] & !((1u64 << king_from) | (1u64 << rook_from)))
+            | (1u64 << king_to)
+            | (1u64 << rook_to);
+        b.hash ^= keys.piece(us, PieceType::King, king_from)
+            ^ keys.piece(us, PieceType::King, king_to)
+            ^ keys.piece(us, PieceType::Rook, rook_from)
+            ^ keys.piece(us, PieceType::Rook, rook_to);
+        for (kind, from, to) in [(king, king_from, king_to), (rook, rook_from, rook_to)] {
+            let (a, z) = (psq[ui][kind][from as usize], psq[ui][kind][to as usize]);
+            b.psq.0 += z.0 - a.0;
+            b.psq.1 += z.1 - a.1;
+        }
+
+        if us == Color::White {
+            if self.castling.white_kingside {
+                b.hash ^= keys.castling[0];
+            }
+            if self.castling.white_queenside {
+                b.hash ^= keys.castling[1];
+            }
+            b.castling.white_kingside = false;
+            b.castling.white_queenside = false;
+        } else {
+            if self.castling.black_kingside {
+                b.hash ^= keys.castling[2];
+            }
+            if self.castling.black_queenside {
+                b.hash ^= keys.castling[3];
+            }
+            b.castling.black_kingside = false;
+            b.castling.black_queenside = false;
+            b.fullmove_number += 1;
+        }
+        b.side_to_move = us.opposite();
+        b.hash ^= keys.side_to_move;
         b
     }
 
